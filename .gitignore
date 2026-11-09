@@ -192,3 +192,10 @@ project/target
 uv.lock
 
 monday/models/*
+
+# Experimentos de competencia (datasets y salidas viven en la VM)
+datasets/
+exp/
+*.RDATA
+*.RData
+.Rhistory

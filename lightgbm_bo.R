@@ -147,6 +147,20 @@ ganancia_maxima <- function(prob, clase_ternaria) {
 
 minutos <- function(t0) as.numeric(difftime(Sys.time(), t0, units = "mins"))
 
+# Checkpoints: si la corrida se corta, al volver a correr el script se retoma
+#  - cada evaluacion de la BO se agrega a bo_evaluaciones.txt apenas termina
+#  - cada semilla de produccion se guarda en semillas/ apenas termina
+# para empezar de cero, borrar la carpeta del experimento
+ARCH_BO_EVALS <- "bo_evaluaciones.txt"
+DIR_SEMILLAS <- "semillas"
+
+# escribe a un temporal y renombra, para no dejar archivos a medio escribir
+fwrite_atomico <- function(x, file, ...) {
+  tmp <- paste0(file, ".tmp")
+  fwrite(x, file = tmp, ...)
+  file.rename(tmp, file)
+}
+
 # 01 Preprocesamiento -----------------------------------------------------
 
 t_inicio <- Sys.time()
@@ -299,12 +313,23 @@ EstimarAUC_lightgbm <- function(xs) {
   rm(modelo)
   gc(full = TRUE, verbose = FALSE)
 
+  t_eval <- minutos(t0)
+
+  # checkpoint: agrego la evaluacion al archivo apenas termina
+  fwrite(data.table(num_iterations = xs$num_iterations,
+                    num_leaves = xs$num_leaves,
+                    min_sum_hessian_in_leaf = xs$min_sum_hessian_in_leaf,
+                    auc = auc,
+                    minutos = t_eval),
+         file = ARCH_BO_EVALS, sep = "\t",
+         append = file.exists(ARCH_BO_EVALS))
+
   message(format(Sys.time(), "%a %b %d %X %Y"),
           " AUC ", round(auc, 6),
-          " (", round(minutos(t0), 1), " min) ",
+          " (", round(t_eval, 1), " min) ",
           paste(names(xs), unlist(xs), sep = "=", collapse = " "))
 
-  list(auc = auc, minutos = minutos(t0))
+  list(auc = auc, minutos = t_eval)
 }
 
 bordes <- PARAM$hyperparametertuning$bordes
@@ -340,10 +365,48 @@ instancia <- oi(
 )
 
 # diseno inicial (los puntos "no inteligentes")
+# es determinista dada la semilla, asi que al retomar es el mismo
 set.seed(PARAM$semilla_primigenia)
 diseno <- generate_design_sobol(espacio_busqueda,
                                 n = PARAM$hyperparametertuning$diseno_inicial)
-instancia$eval_batch(diseno$data)
+n_diseno <- nrow(diseno$data)
+
+# retomo las evaluaciones hechas en una corrida anterior que se corto
+n_previas <- 0L
+if (file.exists(ARCH_BO_EVALS)) {
+  previas <- fread(ARCH_BO_EVALS)
+  previas <- previas[!is.na(auc)] # descarto una linea a medio escribir
+  n_previas <- nrow(previas)
+
+  # las primeras evaluaciones son el diseno inicial, en el mismo orden
+  k <- min(n_previas, n_diseno)
+  if (k > 0) {
+    esperado <- diseno$data[1:k]
+    coincide <-
+      all(previas$num_iterations[1:k] == esperado$num_iterations) &&
+      all(previas$num_leaves[1:k] == esperado$num_leaves) &&
+      isTRUE(all.equal(log(previas$min_sum_hessian_in_leaf[1:k]),
+                       esperado$min_sum_hessian_in_leaf, tolerance = 1e-8))
+    if (!coincide) {
+      stop("bo_evaluaciones.txt no corresponde a esta configuracion. ",
+           "Para empezar de cero, borre la carpeta ", PATH_EXP)
+    }
+  }
+
+  for (i in seq_len(n_previas)) {
+    xdt <- previas[i, list(num_iterations, num_leaves,
+                           min_sum_hessian_in_leaf = log(min_sum_hessian_in_leaf))]
+    xss <- list(as.list(previas[i, list(num_iterations, num_leaves,
+                                        min_sum_hessian_in_leaf)]))
+    instancia$archive$add_evals(xdt, xss,
+                                previas[i, list(auc, minutos)])
+  }
+  cat("BO: se retoman ", n_previas, " evaluaciones de la corrida anterior\n")
+}
+
+if (n_previas < n_diseno) {
+  instancia$eval_batch(diseno$data[(n_previas + 1):n_diseno])
+}
 
 # iteraciones bayesianas: kriging matern 3/2 + expected improvement
 surrogate <- srlrn(lrn("regr.km",
@@ -359,7 +422,19 @@ optimizador <- opt("mbo",
                        terminator = trm("evals", n_evals = 10000))
 )
 
-optimizador$optimize(instancia)
+# las iteraciones bayesianas se hacen de a una, fijando una semilla que
+# depende de cuantas evaluaciones hay: asi una corrida retomada propone
+# exactamente los mismos puntos que una corrida sin cortes
+n_total <- PARAM$hyperparametertuning$diseno_inicial +
+  PARAM$hyperparametertuning$iteraciones
+
+while (instancia$archive$n_evals < n_total) {
+  n_actual <- instancia$archive$n_evals
+  set.seed(PARAM$semilla_primigenia + n_actual)
+  instancia$terminator$param_set$values$n_evals <- n_actual + 1L
+  optimizador$optimize(instancia)
+}
+instancia$terminator$param_set$values$n_evals <- n_total
 
 tb_bayesiana <- as.data.table(instancia$archive$data)
 tb_bayesiana <- tb_bayesiana[, c(
@@ -413,29 +488,61 @@ PARAM$produccion$lista_semillas <- semillas
 tb_prediccion <- dfuture[, list(numero_de_cliente, foto_mes, clase_ternaria)]
 tb_semillas <- list()
 
+dir.create(DIR_SEMILLAS, showWarnings = FALSE)
+
+# checkpoint de las semillas: la prediccion de cada una se guarda apenas
+# termina, junto con los hiperparametros con que se entreno
 for (i in seq_along(semillas)) {
   t0 <- Sys.time()
   param_final$seed <- semillas[i]
+  arch_semilla <- file.path(DIR_SEMILLAS, paste0("pred_", semillas[i], ".txt"))
 
-  modelo <- lgb.train(data = dtrain_final, param = param_final)
-  prob <- predict(modelo, mfuture)
-  tb_prediccion[, paste0("prob_", i) := prob]
-
-  if (i == 1) {
-    fwrite(as.data.table(lgb.importance(modelo)),
-           file = "impo.txt", sep = "\t")
+  prob <- NULL
+  if (file.exists(arch_semilla)) {
+    previa <- fread(arch_semilla)
+    if (identical(previa$numero_de_cliente, tb_prediccion$numero_de_cliente) &&
+        isTRUE(all.equal(previa$num_iterations[1], mejores$num_iterations)) &&
+        isTRUE(all.equal(previa$num_leaves[1], mejores$num_leaves)) &&
+        isTRUE(all.equal(previa$min_sum_hessian_in_leaf[1],
+                         mejores$min_sum_hessian_in_leaf))) {
+      prob <- previa$prob
+      t_semilla <- previa$minutos[1]
+      cat("Semilla ", semillas[i], " retomada de la corrida anterior\n", sep = "")
+    }
   }
+
+  if (is.null(prob)) {
+    modelo <- lgb.train(data = dtrain_final, param = param_final)
+    prob <- predict(modelo, mfuture)
+    t_semilla <- minutos(t0)
+
+    if (i == 1) {
+      fwrite(as.data.table(lgb.importance(modelo)),
+             file = "impo.txt", sep = "\t")
+    }
+
+    fwrite_atomico(data.table(numero_de_cliente = tb_prediccion$numero_de_cliente,
+                              prob = prob,
+                              minutos = t_semilla,
+                              num_iterations = mejores$num_iterations,
+                              num_leaves = mejores$num_leaves,
+                              min_sum_hessian_in_leaf =
+                                mejores$min_sum_hessian_in_leaf),
+                   file = arch_semilla, sep = "\t")
+
+    rm(modelo)
+    gc(full = TRUE, verbose = FALSE)
+  }
+
+  tb_prediccion[, paste0("prob_", i) := prob]
 
   g <- ganancia_maxima(prob, tb_prediccion$clase_ternaria)
   tb_semillas[[i]] <- data.table(semilla = semillas[i],
                                  ganancia = g$ganancia,
                                  envios = g$envios,
-                                 minutos = minutos(t0))
+                                 minutos = t_semilla)
   cat("Semilla ", semillas[i], " ganancia=", format(g$ganancia, big.mark = ".", decimal.mark = ","),
       " envios=", g$envios, "\n", sep = "")
-
-  rm(modelo)
-  gc(full = TRUE, verbose = FALSE)
 }
 
 tb_semillas <- rbindlist(tb_semillas)
@@ -464,11 +571,15 @@ PARAM$out$produccion <- list(
 
 PARAM$out$cantidad_columnas <- length(campos_buenos)
 PARAM$out$registros_training <- nrow(dataset_train)
+# tiempos de reloj de esta corrida (si se retomo, no incluyen la anterior)
+# y suma de los tiempos de entrenamiento, que si incluyen lo retomado
 PARAM$out$minutos <- list(
   preprocesamiento = t_preproc,
   optimizacion = t_bo,
   produccion = t_prod,
-  total = minutos(t_inicio)
+  total = minutos(t_inicio),
+  entrenamiento_bo = sum(tb_bayesiana$minutos),
+  entrenamiento_produccion = sum(tb_semillas$minutos)
 )
 
 write_yaml(PARAM, file = "PARAM.yml")
@@ -483,7 +594,9 @@ cat("\n==== ", PARAM$experimento, " ====\n",
     format(round(mean(tb_semillas$ganancia)), big.mark = ".", decimal.mark = ","), "\n",
     "Desvio entre semillas: ",
     format(round(sd(tb_semillas$ganancia)), big.mark = ".", decimal.mark = ","), "\n",
-    "Tiempo total (min): ", round(minutos(t_inicio), 1), "\n",
+    "Tiempo de entrenamiento BO + produccion (min): ",
+    round(sum(tb_bayesiana$minutos) + sum(tb_semillas$minutos), 1), "\n",
+    "Tiempo total de esta corrida (min): ", round(minutos(t_inicio), 1), "\n",
     sep = "")
 
 format(Sys.time(), "%a %b %d %X %Y")

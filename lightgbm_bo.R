@@ -154,6 +154,45 @@ minutos <- function(t0) as.numeric(difftime(Sys.time(), t0, units = "mins"))
 ARCH_BO_EVALS <- "bo_evaluaciones.txt"
 DIR_SEMILLAS <- "semillas"
 
+# importancia de variables (Gain, Cover, Frequency) igual a lgb.importance,
+# pero leyendo el modelo guardado en disco de a pedazos: lgb.importance arma
+# todo el modelo como un unico JSON en memoria, y con miles de arboles de
+# miles de hojas supera el limite de 2^31-1 bytes de un string de R
+importancia_lgbm <- function(modelo, archivo) {
+  lgb.save(modelo, archivo) # lo escribe LightGBM desde C, sin ese limite
+  on.exit(unlink(archivo))
+  con <- file(archivo, "r")
+  on.exit(close(con), add = TRUE)
+
+  nombres <- NULL
+  feat <- list(); gain <- list(); cover <- list(); k <- 0L
+  repeat {
+    lineas <- readLines(con, n = 20000L)
+    if (length(lineas) == 0L) break
+    if (is.null(nombres)) {
+      fn <- grep("^feature_names=", lineas, value = TRUE)
+      if (length(fn)) nombres <- strsplit(sub("^feature_names=", "", fn[1]), " ")[[1]]
+    }
+    sf <- grep("^split_feature=", lineas, value = TRUE)
+    sg <- grep("^split_gain=", lineas, value = TRUE)
+    ic <- grep("^internal_count=", lineas, value = TRUE)
+    for (j in seq_along(sf)) {
+      k <- k + 1L
+      feat[[k]] <- as.integer(strsplit(sub("^split_feature=", "", sf[j]), " ")[[1]])
+      gain[[k]] <- as.numeric(strsplit(sub("^split_gain=", "", sg[j]), " ")[[1]])
+      cover[[k]] <- as.numeric(strsplit(sub("^internal_count=", "", ic[j]), " ")[[1]])
+    }
+  }
+
+  dt <- data.table(Feature = nombres[unlist(feat) + 1L],
+                   g = unlist(gain), c = unlist(cover))
+  imp <- dt[, list(Gain = sum(g), Cover = sum(c), Frequency = .N), by = Feature]
+  imp[, `:=`(Gain = Gain / sum(Gain), Cover = Cover / sum(Cover),
+             Frequency = Frequency / sum(Frequency))]
+  setorder(imp, -Gain)
+  imp[]
+}
+
 # escribe a un temporal y renombra, para no dejar archivos a medio escribir
 fwrite_atomico <- function(x, file, ...) {
   tmp <- paste0(file, ".tmp")
@@ -489,6 +528,7 @@ tb_prediccion <- dfuture[, list(numero_de_cliente, foto_mes, clase_ternaria)]
 tb_semillas <- list()
 
 dir.create(DIR_SEMILLAS, showWarnings = FALSE)
+intento_importancia <- FALSE
 
 # checkpoint de las semillas: la prediccion de cada una se guarda apenas
 # termina, junto con los hiperparametros con que se entreno
@@ -516,11 +556,7 @@ for (i in seq_along(semillas)) {
     prob <- predict(modelo, mfuture)
     t_semilla <- minutos(t0)
 
-    if (i == 1) {
-      fwrite(as.data.table(lgb.importance(modelo)),
-             file = "impo.txt", sep = "\t")
-    }
-
+    # la prediccion se guarda primero: es lo que no se puede perder
     fwrite_atomico(data.table(numero_de_cliente = tb_prediccion$numero_de_cliente,
                               prob = prob,
                               minutos = t_semilla,
@@ -529,6 +565,18 @@ for (i in seq_along(semillas)) {
                               min_sum_hessian_in_leaf =
                                 mejores$min_sum_hessian_in_leaf),
                    file = arch_semilla, sep = "\t")
+
+    # la importancia es informativa: si falla, se avisa y el semilleo sigue
+    if (!file.exists("impo.txt") && !intento_importancia) {
+      intento_importancia <- TRUE
+      tryCatch(
+        fwrite(importancia_lgbm(modelo, "modelo_tmp.txt"),
+               file = "impo.txt", sep = "\t"),
+        error = function(e) {
+          warning("No se pudo calcular la importancia: ", conditionMessage(e))
+        }
+      )
+    }
 
     rm(modelo)
     gc(full = TRUE, verbose = FALSE)

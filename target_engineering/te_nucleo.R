@@ -37,10 +37,17 @@ gc(full = TRUE, verbose = FALSE)
 
 # Librerias ---------------------------------------------------------------
 
+# sin sudo no se puede escribir en la biblioteca del sistema: los paquetes
+# que falten se instalan en la biblioteca personal (~/R/...)
+lib_usuario <- path.expand(strsplit(Sys.getenv("R_LIBS_USER"), .Platform$path.sep)[[1]][1])
+dir.create(lib_usuario, showWarnings = FALSE, recursive = TRUE)
+.libPaths(c(lib_usuario, .libPaths()))
+
 instalar_y_cargar <- function(paquetes) {
   for (p in paquetes) {
     if (!require(p, character.only = TRUE)) {
-      install.packages(p, repos = "https://cloud.r-project.org")
+      install.packages(p, lib = lib_usuario, repos = "https://cloud.r-project.org",
+                       Ncpus = parallel::detectCores())
       require(p, character.only = TRUE)
     }
   }

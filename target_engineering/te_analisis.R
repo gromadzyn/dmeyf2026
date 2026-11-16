@@ -46,9 +46,23 @@ ganancia_maxima <- function(score, clase_ternaria) {
 # lectura de las predicciones --------------------------------------------
 
 # devuelve data.table numero_de_cliente + una columna s<semilla> por semilla
+# Solo usa las semillas entrenadas con los hiperparametros de la BO actual,
+# que son los de la semilla escrita mas recientemente. Las que quedaron de
+# una corrida anterior (por ejemplo, copiadas de la BO de 22 evaluaciones)
+# se ignoran hasta que el script las reentrena.
+HIPER <- c("num_iterations", "num_leaves", "min_sum_hessian_in_leaf")
+
 leer_semillas <- function(exp) {
   archs <- Sys.glob(file.path(PATH_EXP, exp, "semillas", "pred_*.txt"))
   if (!length(archs)) return(NULL)
+  archs <- archs[order(file.mtime(archs), decreasing = TRUE)]
+  hiper <- lapply(archs, function(a) fread(a, select = HIPER, nrows = 1))
+  vigentes <- sapply(hiper, function(h) isTRUE(all.equal(h, hiper[[1]])))
+  if (any(!vigentes)) {
+    cat(exp, ": se ignoran ", sum(!vigentes),
+        " semillas entrenadas con otros hiperparametros\n", sep = "")
+  }
+  archs <- archs[vigentes]
   out <- NULL
   for (a in archs) {
     s <- paste0("s", sub("^pred_([0-9]+)\\.txt$", "\\1", basename(a)))

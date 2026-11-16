@@ -19,7 +19,9 @@
 #      (762 columnas para entrenar)
 # 02 Optimizacion de hiperparametros (mlr3mbo)
 #    - undersampling 0.1 de los CONTINUA, training_pct 70 (holdout 70/30)
-#    - 12 puntos de diseno inicial + 10 iteraciones bayesianas
+#    - iteraciones = 10 TOTALES (diapositiva del baseline). El diseno inicial
+#      de mlr3mbo (4 x 3 hiperparametros = 12 puntos Sobol) se evalua completo,
+#      asi que terminan siendo 12 evaluaciones y ninguna bayesiana
 #    - se reporta AUC y mejores hiperparametros
 # 03 Produccion
 #    - training final 201901 a 202104 con undersampling 0.1
@@ -78,8 +80,10 @@ PARAM$trainingstrategy$undersampling <- 0.1
 PARAM$hyperparametertuning$training_pct <- 70 # holdout 70/30
 PARAM$hyperparametertuning$ksemillerio <- 1
 PARAM$hyperparametertuning$repe <- 1
+PARAM$hyperparametertuning$iteraciones <- 10 # evaluaciones TOTALES de la BO
+# diseno inicial por defecto de mlr3mbo (4 x cantidad de hiperparametros);
+# se evalua completo aunque supere las iteraciones: terminan siendo 12
 PARAM$hyperparametertuning$diseno_inicial <- 12
-PARAM$hyperparametertuning$iteraciones <- 10 # iteraciones bayesianas
 
 # Produccion
 PARAM$produccion$semillas <- 10
@@ -419,12 +423,15 @@ objetivo <- ObjectiveRFun$new(
   codomain = ps(auc = p_dbl(tags = "maximize"))
 )
 
+# evaluaciones totales: las iteraciones, salvo que el diseno inicial sea mayor
+n_total <- max(PARAM$hyperparametertuning$iteraciones,
+               PARAM$hyperparametertuning$diseno_inicial)
+
 instancia <- oi(
   objective = objetivo,
   search_space = espacio_busqueda,
   terminator = trm("evals",
-                   n_evals = PARAM$hyperparametertuning$diseno_inicial +
-                     PARAM$hyperparametertuning$iteraciones)
+                   n_evals = n_total)
 )
 
 # diseno inicial (los puntos "no inteligentes")
@@ -440,6 +447,10 @@ if (file.exists(ARCH_BO_EVALS)) {
   previas <- fread(ARCH_BO_EVALS)
   previas <- previas[!is.na(auc)] # descarto una linea a medio escribir
   n_previas <- nrow(previas)
+  if (n_previas > n_total) {
+    stop("bo_evaluaciones.txt tiene ", n_previas, " evaluaciones y la BO es de ",
+         n_total, ". Deje solo las primeras ", n_total, " o empiece de cero")
+  }
 
   # las primeras evaluaciones son el diseno inicial, en el mismo orden
   k <- min(n_previas, n_diseno)
@@ -488,8 +499,6 @@ optimizador <- opt("mbo",
 # las iteraciones bayesianas se hacen de a una, fijando una semilla que
 # depende de cuantas evaluaciones hay: asi una corrida retomada propone
 # exactamente los mismos puntos que una corrida sin cortes
-n_total <- PARAM$hyperparametertuning$diseno_inicial +
-  PARAM$hyperparametertuning$iteraciones
 
 while (instancia$archive$n_evals < n_total) {
   n_actual <- instancia$archive$n_evals

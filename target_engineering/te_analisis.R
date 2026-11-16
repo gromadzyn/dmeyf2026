@@ -13,7 +13,10 @@
 #   Wilcoxon pareado por semilla contra Exp_0, unilateral (w gana),
 #   corregido por Holm sobre todos los pesos comparados
 #   H1 se acepta si algun w < 1 gana con p corregido < 0.05
-#   Fase 2 (condicional): si H1 se acepta, se sugiere probar w +- 0.1
+#   Fase 2 (condicional): si H1 se acepta, se corren w +- 0.1 del mejor.
+#   Los pesos de la fase 2 se detectan solos (carpetas exp/TE_w*), se
+#   comparan contra Exp_0 aparte, con Holm sobre los pesos de la fase 2,
+#   y entran tambien en los ensambles y en el chequeo de bordes.
 #
 # Familia 2 - ensamble del baseline con CADA peso, semilla por semilla
 #   score = alfa * rank(Exp_0) + (1 - alfa) * rank(w), alfa en 0.1..0.9
@@ -39,7 +42,7 @@ PATH_SALIDA <- file.path(PATH_EXP, "TE_analisis")
 dir.create(PATH_SALIDA, showWarnings = FALSE, recursive = TRUE)
 
 EXP_BASE <- "Exp_0" # w = 1
-PESOS <- c(0.75, 0.5, 0.25, 0, 1.5)
+PESOS <- c(0.75, 0.5, 0.25, 0, 1.5) # fase 1 (diseno original)
 ALFAS <- seq(0.1, 0.9, by = 0.1)
 NIVEL <- 0.05
 
@@ -90,8 +93,15 @@ leer_semillas <- function(exp) {
 
 nombre_exp <- function(w) if (w == 1) EXP_BASE else sprintf("TE_w%.2f", w)
 
+# pesos de la fase 2: cualquier otra carpeta TE_w<peso>
+carpetas <- basename(Sys.glob(file.path(PATH_EXP, "TE_w*")))
+carpetas <- carpetas[grepl("^TE_w[0-9]+\\.[0-9]{2}$", carpetas)]
+PESOS_FASE2 <- setdiff(as.numeric(sub("^TE_w", "", carpetas)), c(1, PESOS))
+PESOS_TODOS <- c(PESOS, sort(PESOS_FASE2))
+if (length(PESOS_FASE2)) cat("Pesos de la fase 2:", sort(PESOS_FASE2), "\n")
+
 preds <- list()
-for (w in c(1, PESOS)) {
+for (w in c(1, PESOS_TODOS)) {
   p <- leer_semillas(nombre_exp(w))
   if (is.null(p)) cat("Sin semillas terminadas todavia:", nombre_exp(w), "\n")
   else preds[[as.character(w)]] <- p
@@ -148,7 +158,7 @@ resumen_f1 <- tb_semillas[, list(semillas = .N,
                           peso]
 setorder(resumen_f1, -ganancia_media)
 
-test_f1 <- rbindlist(lapply(setdiff(as.numeric(names(preds)), 1), function(w) {
+test_f1 <- rbindlist(lapply(intersect(PESOS, as.numeric(names(preds))), function(w) {
   cbind(peso = w, comparar(tb_semillas[peso == w], base))
 }))
 if (nrow(test_f1)) {
@@ -170,8 +180,21 @@ cat(if (nrow(test_f1) && any(test_f1$acepta_H1)) "H1 se ACEPTA" else
 if (nrow(test_f1) && any(test_f1$acepta_H1)) {
   mejor_w <- test_f1[acepta_H1 == TRUE][which.max(dif_media), peso]
   refinar <- setdiff(round(pmax(0, mejor_w + c(-0.1, 0.1)), 2), c(1, PESOS))
-  cat("\nFase 2: w =", mejor_w, "gana con p corregido <", NIVEL, "-> refinar en",
-      paste(refinar, collapse = " y "), "\n")
+  cat("\nFase 2: w =", mejor_w, "gana con p corregido <", NIVEL, "-> correr",
+      paste(sprintf("TE_w%.2f", refinar), collapse = " y "), "\n")
+}
+
+# Fase 2: contra Exp_0, con Holm sobre los pesos de la fase 2
+w_f2 <- intersect(PESOS_FASE2, as.numeric(names(preds)))
+if (length(w_f2)) {
+  test_fase2 <- rbindlist(lapply(w_f2, function(w) {
+    cbind(peso = w, comparar(tb_semillas[peso == w], base))
+  }))
+  test_fase2[, p_holm := p.adjust(p_valor, method = "holm")]
+  test_fase2[, gana := !is.na(p_holm) & p_holm < NIVEL]
+  cat("\n==== Fase 2: Wilcoxon pareado contra ", EXP_BASE, " ====\n", sep = "")
+  print(test_fase2)
+  fwrite(test_fase2, file.path(PATH_SALIDA, "fase2_wilcoxon.txt"), sep = "\t")
 }
 
 # Familia 2 ---------------------------------------------------------------
@@ -240,7 +263,7 @@ if (nrow(tb_ensamble)) {
 # Bordes ------------------------------------------------------------------
 
 # hiperparametros optimos de cada brazo: los guarda cada archivo de semilla
-tb_bordes <- rbindlist(lapply(c(1, PESOS), function(w) {
+tb_bordes <- rbindlist(lapply(c(1, PESOS_TODOS), function(w) {
   archs <- Sys.glob(file.path(PATH_EXP, nombre_exp(w), "semillas", "pred_*.txt"))
   if (!length(archs)) return(NULL)
   a <- archs[which.max(file.mtime(archs))]

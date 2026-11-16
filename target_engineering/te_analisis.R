@@ -15,14 +15,14 @@
 #   H1 se acepta si algun w < 1 gana con p corregido < 0.05
 #   Fase 2 (condicional): si H1 se acepta, se sugiere probar w +- 0.1
 #
-# Familia 2 - ensamble del baseline con el mejor peso, semilla por semilla
-#   mejor peso = el w != 1 con mayor ganancia media
+# Familia 2 - ensamble del baseline con CADA peso, semilla por semilla
 #   score = alfa * rank(Exp_0) + (1 - alfa) * rank(w), alfa en 0.1..0.9
-#   Wilcoxon contra Exp_0 y contra w solo, cada uno corregido por Holm
-#   sobre los 9 alfas. H2 se acepta si algun alfa gana a los dos.
+#   Para cada w: Wilcoxon contra Exp_0 y contra w solo, cada uno corregido
+#   por Holm sobre los 9 alfas de ese w.
+#   H2 se decide con el mejor peso ponderado (el w != 1 con mayor ganancia
+#   media): se acepta si algun alfa le gana a Exp_0 y a w.
 #   OJO: el mejor w se elige en el mismo mes que se evalua (202106), asi
-#   que H2 esta sesgada a favor. La grilla de todos los w va a un archivo
-#   aparte, solo descriptiva.
+#   que H2 esta sesgada a favor.
 #
 # Mecanismo: en el corte donde cada semilla alcanza su ganancia maxima,
 #   cuantos envios son BAJA+1 y cuantos BAJA+2
@@ -195,34 +195,45 @@ ensamblar <- function(w) {
 tb_ensamble <- rbindlist(lapply(setdiff(names(preds), "1"), ensamblar))
 
 if (nrow(tb_ensamble)) {
-  # grilla de todos los pesos: solo descriptiva, sin tests
-  grilla_f2 <- tb_ensamble[, list(semillas = .N, ganancia_media = mean(ganancia),
-                                  envios_medio = mean(envios)), list(peso, alfa)]
-  setorder(grilla_f2, -ganancia_media)
-
-  # H2: el mejor peso ponderado (w != 1 con mayor ganancia media)
-  mejor_pond <- resumen_f1[peso != 1][which.max(ganancia_media), peso]
-  ens <- tb_ensamble[peso == mejor_pond]
-  test_f2 <- ens[, {
+  # tests para cada peso y cada alfa; Holm sobre los 9 alfas de cada peso
+  test_f2 <- tb_ensamble[, {
+    w_ <- .BY$peso
     cb <- comparar(.SD, base)
-    cw <- comparar(.SD, tb_semillas[peso == mejor_pond])
+    cw <- comparar(.SD, tb_semillas[peso == w_])
     list(pares = cb$pares, ganancia_media = mean(ganancia),
+         envios_medio = mean(envios),
          dif_vs_base = cb$dif_media, p_vs_base = cb$p_valor,
          dif_vs_w = cw$dif_media, p_vs_w = cw$p_valor)
-  }, alfa]
-  test_f2[, p_holm_vs_base := p.adjust(p_vs_base, method = "holm")]
-  test_f2[, p_holm_vs_w := p.adjust(p_vs_w, method = "holm")]
+  }, list(peso, alfa)]
+  test_f2[, p_holm_vs_base := p.adjust(p_vs_base, method = "holm"), peso]
+  test_f2[, p_holm_vs_w := p.adjust(p_vs_w, method = "holm"), peso]
   test_f2[, gana_a_ambos := !is.na(p_holm_vs_base) & p_holm_vs_base < NIVEL &
             !is.na(p_holm_vs_w) & p_holm_vs_w < NIVEL]
+  setorder(test_f2, peso, alfa)
 
-  cat("\n==== Familia 2: ensamble de ", EXP_BASE, " con el mejor peso (w = ",
-      mejor_pond, ") ====\n", sep = "")
-  print(test_f2)
-  cat(if (any(test_f2$gana_a_ambos)) "H2 se ACEPTA" else "H2 NO se acepta (todavia)",
+  # resumen por peso: el mejor alfa de cada w
+  resumen_f2 <- test_f2[order(-ganancia_media), .SD[1], peso]
+  resumen_f2[, alfas_que_ganan_a_ambos := test_f2[, sum(gana_a_ambos), peso][
+    match(resumen_f2$peso, peso), V1]]
+  setorder(resumen_f2, -ganancia_media)
+
+  cat("\n==== Familia 2: ensamble de ", EXP_BASE, " con cada peso (mejor alfa de cada w) ====\n",
+      sep = "")
+  print(resumen_f2[, list(peso, mejor_alfa = alfa, ganancia_media, dif_vs_base,
+                          p_holm_vs_base, dif_vs_w, p_holm_vs_w,
+                          alfas_que_ganan_a_ambos)])
+
+  # H2: el mejor peso ponderado
+  mejor_pond <- resumen_f1[peso != 1][which.max(ganancia_media), peso]
+  cat("\n==== Familia 2 / H2: mejor peso ponderado (w = ", mejor_pond, "), todos los alfas ====\n",
+      sep = "")
+  print(test_f2[peso == mejor_pond])
+  cat(if (any(test_f2[peso == mejor_pond, gana_a_ambos])) "H2 se ACEPTA" else
+        "H2 NO se acepta (todavia)",
       "\nOJO: el mejor w se eligio en el mismo mes (202106): sesgado a favor.\n")
 
   fwrite(test_f2, file.path(PATH_SALIDA, "f2_wilcoxon.txt"), sep = "\t")
-  fwrite(grilla_f2, file.path(PATH_SALIDA, "f2_grilla_todos_los_pesos.txt"), sep = "\t")
+  fwrite(resumen_f2, file.path(PATH_SALIDA, "f2_resumen.txt"), sep = "\t")
   fwrite(tb_ensamble, file.path(PATH_SALIDA, "f2_ensamble_semillas.txt"), sep = "\t")
 }
 

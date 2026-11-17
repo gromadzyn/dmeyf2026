@@ -130,6 +130,62 @@ PATH_DATASETS <- file.path(HOME_DMeyF, "datasets")
 PATH_EXP <- file.path(HOME_DMeyF, "exp", PARAM$experimento)
 
 dir.create(PATH_EXP, showWarnings = FALSE, recursive = TRUE)
+
+# Respaldo en bucket ------------------------------------------------------
+
+# Si existe ~/dmeyf/bucket.txt con el nombre de un bucket, la carpeta del
+# experimento y su log se suben a gs://<bucket>/exp/ despues de cada
+# checkpoint. En una VM nueva (carpeta sin checkpoints) se bajan de ahi
+# antes de empezar, asi una VM Spot borrada no pierde lo ya calculado.
+# Si la subida falla se avisa en el log y la corrida sigue igual.
+ARCH_BUCKET <- file.path(HOME_DMeyF, "bucket.txt")
+BUCKET <- if (file.exists(ARCH_BUCKET)) {
+  sub("^gs://", "", sub("/+$", "", trimws(readLines(ARCH_BUCKET, n = 1L, warn = FALSE))))
+} else ""
+if (length(BUCKET) == 0 || is.na(BUCKET)) BUCKET <- ""
+GS_EXP <- paste0("gs://", BUCKET, "/exp/", PARAM$experimento)
+ARCH_LOG <- file.path(HOME_DMeyF, "exp", paste0(PARAM$experimento, ".log"))
+
+gcloud <- function(args) {
+  salida <- tryCatch(
+    suppressWarnings(system2("gcloud", args, stdout = TRUE, stderr = TRUE,
+                             timeout = 900)),
+    error = function(e) structure(conditionMessage(e), status = 1L))
+  estado <- attr(salida, "status")
+  list(ok = is.null(estado) || estado == 0L, salida = salida)
+}
+
+respaldar <- function() {
+  if (BUCKET == "") return(invisible(FALSE))
+  r <- gcloud(c("storage", "rsync", "--recursive",
+                shQuote("--exclude=.*\\.tmp$|^modelo_tmp\\.txt$"),
+                shQuote(PATH_EXP), GS_EXP))
+  if (r$ok && file.exists(ARCH_LOG)) {
+    r <- gcloud(c("storage", "cp", shQuote(ARCH_LOG), paste0(GS_EXP, ".log")))
+  }
+  if (!r$ok) {
+    cat("ATENCION: no se pudo respaldar en gs://", BUCKET, ": ",
+        paste(tail(r$salida, 3), collapse = " | "), "\n", sep = "")
+  }
+  invisible(r$ok)
+}
+
+if (BUCKET == "") {
+  cat("ATENCION: sin ", ARCH_BUCKET, ": no se respalda en ningun bucket\n", sep = "")
+} else {
+  hay_checkpoints <- file.exists(file.path(PATH_EXP, "bo_evaluaciones.txt")) ||
+    length(list.files(file.path(PATH_EXP, "semillas"))) > 0
+  if (!hay_checkpoints) {
+    r <- gcloud(c("storage", "rsync", "--recursive", GS_EXP, shQuote(PATH_EXP)))
+    if (r$ok && file.exists(file.path(PATH_EXP, "bo_evaluaciones.txt"))) {
+      cat("Respaldo: checkpoints bajados de ", GS_EXP, "\n", sep = "")
+    } else {
+      cat("Respaldo: no hay checkpoints en ", GS_EXP, ", se empieza de cero\n", sep = "")
+    }
+  }
+  if (respaldar()) cat("Respaldo: OK en ", GS_EXP, "\n", sep = "")
+}
+
 setwd(PATH_EXP)
 
 # Funciones ---------------------------------------------------------------
@@ -178,6 +234,7 @@ minutos <- function(t0) as.numeric(difftime(Sys.time(), t0, units = "mins"))
 # Checkpoints: si la corrida se corta, al volver a correr el script se retoma
 #  - cada evaluacion de la BO se agrega a bo_evaluaciones.txt apenas termina
 #  - cada semilla de produccion se guarda en semillas/ apenas termina
+#  - con ~/dmeyf/bucket.txt, todo se sube al bucket despues de cada una
 # para empezar de cero, borrar la carpeta del experimento
 ARCH_BO_EVALS <- "bo_evaluaciones.txt"
 DIR_SEMILLAS <- "semillas"
@@ -398,6 +455,8 @@ EstimarAUC_lightgbm <- function(xs) {
          file = ARCH_BO_EVALS, sep = "\t",
          append = file.exists(ARCH_BO_EVALS))
 
+  respaldar()
+
   message(format(Sys.time(), "%a %b %d %X %Y"),
           " AUC ", round(auc, 6),
           " (", round(t_eval, 1), " min) ",
@@ -609,6 +668,7 @@ for (i in seq_along(semillas)) {
                               min_sum_hessian_in_leaf =
                                 mejores$min_sum_hessian_in_leaf),
                    file = arch_semilla, sep = "\t")
+    respaldar()
 
     # la importancia es informativa: si falla, se avisa y el semilleo sigue
     if (!file.exists("impo.txt") && !intento_importancia) {
@@ -679,6 +739,7 @@ PARAM$out$minutos <- list(
 )
 
 write_yaml(PARAM, file = "PARAM.yml")
+respaldar()
 
 cat("\n==== ", PARAM$experimento, " ====\n",
     "Peso BAJA+1: ", PARAM$peso_baja1, "\n",

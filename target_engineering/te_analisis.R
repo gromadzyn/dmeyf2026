@@ -1,16 +1,19 @@
 # Analisis de Target Engineering - Grupo B
 #
-# Lee las predicciones por semilla (semillas/pred_<semilla>.txt) de Exp_0
-# (w = 1, control) y de cada exp/TE_w<peso>/, todas sobre el test 202106.
-# No entrena nada y se puede correr en cualquier momento: usa las semillas
-# que ya terminaron, pareadas por numero de semilla.
+# Cada brazo (Exp_0 = w 1, control, y cada exp/TE_w<peso>/) corre 10 veces
+# el pipeline completo, una por semilla primigenia (sp_<semilla>/). La
+# unidad de analisis es la CORRIDA: su prediccion es el promedio de sus 10
+# semillas de produccion (prediccion.txt), sobre el test 202106.
+# No entrena nada y se puede correr en cualquier momento: usa las corridas
+# que ya terminaron (con PARAM.yml), pareadas por semilla primigenia, que es
+# la misma en todos los brazos.
 #
 # Sigue la diapositiva 5 de la propuesta (Experimento_colaborativo_3min).
 #
 # Familia 1 - pesos de BAJA+1
-#   ganancia de cada semilla = ganancia maxima de esa semilla en 202106
-#   ganancia media = promedio de las semillas (como el bot de la catedra)
-#   Wilcoxon pareado por semilla contra Exp_0, unilateral (w gana),
+#   ganancia de cada corrida = ganancia maxima de su ensamble en 202106
+#   ganancia media = promedio de las 10 corridas
+#   Wilcoxon pareado por corrida contra Exp_0, unilateral (w gana),
 #   corregido por Holm sobre todos los pesos comparados
 #   H1 se acepta si algun w < 1 gana con p corregido < 0.05
 #   Fase 2 (condicional): si H1 se acepta, se corren w +- 0.1 del mejor.
@@ -18,7 +21,7 @@
 #   comparan contra Exp_0 aparte, con Holm sobre los pesos de la fase 2,
 #   y entran tambien en los ensambles y en el chequeo de bordes.
 #
-# Familia 2 - ensamble del baseline con CADA peso, semilla por semilla
+# Familia 2 - ensamble del baseline con CADA peso, corrida por corrida
 #   score = alfa * rank(Exp_0) + (1 - alfa) * rank(w), alfa en 0.1..0.9
 #   Para cada w: Wilcoxon contra Exp_0 y contra w solo, cada uno corregido
 #   por Holm sobre los 9 alfas de ese w.
@@ -27,11 +30,11 @@
 #   OJO: el mejor w se elige en el mismo mes que se evalua (202106), asi
 #   que H2 esta sesgada a favor.
 #
-# Mecanismo: en el corte donde cada semilla alcanza su ganancia maxima,
+# Mecanismo: en el corte donde cada corrida alcanza su ganancia maxima,
 #   cuantos envios son BAJA+1 y cuantos BAJA+2
 #
 # Bordes: avisa si algun hiperparametro optimo quedo contra el borde
-#   del rango de la BO
+#   del rango de la BO, en cuantas de las corridas de cada brazo
 #
 # Uso:  Rscript te_analisis.R
 
@@ -49,7 +52,7 @@ NIVEL <- 0.05
 # bordes de la BO (los mismos de te_nucleo.R y lightgbm_bo.R)
 BORDES <- list(num_iterations = c(64, 4096), num_leaves = c(16, 2048),
                min_sum_hessian_in_leaf = c(1e-06, 0.1))
-TOL_BORDE <- 0.05 # a menos del 5% del rango (en escala log para el hessian)
+TOL_BORDE <- 0.05 # a menos del 5% del rango (escala lineal, como la BO)
 
 GAN_ACIERTO <- 1072500
 GAN_ERROR <- -27500
@@ -63,28 +66,23 @@ ganancia_maxima <- function(score, clase_ternaria) {
 
 # lectura de las predicciones --------------------------------------------
 
-# devuelve data.table numero_de_cliente + una columna s<semilla> por semilla
-# Solo usa las semillas entrenadas con los hiperparametros de la BO actual,
-# que son los de la semilla escrita mas recientemente. Las que quedaron de
-# una corrida anterior (por ejemplo, copiadas de la BO de 22 evaluaciones)
-# se ignoran hasta que el script las reentrena.
+# devuelve data.table numero_de_cliente + una columna s<semilla primigenia>
+# por corrida terminada (con PARAM.yml), con la prob promedio de sus semillas
 HIPER <- c("num_iterations", "num_leaves", "min_sum_hessian_in_leaf")
 
-leer_semillas <- function(exp) {
-  archs <- Sys.glob(file.path(PATH_EXP, exp, "semillas", "pred_*.txt"))
-  if (!length(archs)) return(NULL)
-  archs <- archs[order(file.mtime(archs), decreasing = TRUE)]
-  hiper <- lapply(archs, function(a) fread(a, select = HIPER, nrows = 1))
-  vigentes <- sapply(hiper, function(h) isTRUE(all.equal(h, hiper[[1]])))
-  if (any(!vigentes)) {
-    cat(exp, ": se ignoran ", sum(!vigentes),
-        " semillas entrenadas con otros hiperparametros\n", sep = "")
-  }
-  archs <- archs[vigentes]
+corridas_terminadas <- function(exp) {
+  dirs <- Sys.glob(file.path(PATH_EXP, exp, "sp_*"))
+  dirs[file.exists(file.path(dirs, "PARAM.yml")) &
+         file.exists(file.path(dirs, "prediccion.txt"))]
+}
+
+leer_corridas <- function(exp) {
+  dirs <- corridas_terminadas(exp)
+  if (!length(dirs)) return(NULL)
   out <- NULL
-  for (a in archs) {
-    s <- paste0("s", sub("^pred_([0-9]+)\\.txt$", "\\1", basename(a)))
-    p <- fread(a, select = c("numero_de_cliente", "prob"))
+  for (d in dirs) {
+    s <- paste0("s", sub("^sp_", "", basename(d)))
+    p <- fread(file.path(d, "prediccion.txt"), select = c("numero_de_cliente", "prob"))
     setnames(p, "prob", s)
     out <- if (is.null(out)) p else merge(out, p, by = "numero_de_cliente")
   }
@@ -102,41 +100,41 @@ if (length(PESOS_FASE2)) cat("Pesos de la fase 2:", sort(PESOS_FASE2), "\n")
 
 preds <- list()
 for (w in c(1, PESOS_TODOS)) {
-  p <- leer_semillas(nombre_exp(w))
-  if (is.null(p)) cat("Sin semillas terminadas todavia:", nombre_exp(w), "\n")
+  p <- leer_corridas(nombre_exp(w))
+  if (is.null(p)) cat("Sin corridas terminadas todavia:", nombre_exp(w), "\n")
   else preds[[as.character(w)]] <- p
 }
-if (is.null(preds[["1"]])) stop("Hace falta al menos una semilla de ", EXP_BASE)
+if (is.null(preds[["1"]])) stop("Hace falta al menos una corrida terminada de ", EXP_BASE)
 
-# clase_ternaria de 202106: Exp_0 no la guarda, la tomo de un TE
-arch_clase <- Sys.glob(file.path(PATH_EXP, "TE_w*", "semillas", "pred_*.txt"))
-if (!length(arch_clase)) stop("Hace falta al menos una semilla de algun TE_w*")
+# clase_ternaria de 202106: la guarda cada archivo de semilla
+arch_clase <- Sys.glob(file.path(PATH_EXP, c(EXP_BASE, "TE_w*"), "sp_*", "semillas", "pred_*.txt"))
+if (!length(arch_clase)) stop("No encuentro ningun semillas/pred_*.txt")
 clases <- fread(arch_clase[1], select = c("numero_de_cliente", "clase_ternaria"))
 
 preds <- lapply(preds, function(p) merge(clases, p, by = "numero_de_cliente"))
-semillas_de <- function(p) grep("^s[0-9]+$", colnames(p), value = TRUE)
-cat("Semillas por brazo:",
-    paste0(names(preds), "=", sapply(preds, function(p) length(semillas_de(p))),
+corridas_de <- function(p) grep("^s[0-9]+$", colnames(p), value = TRUE)
+cat("Corridas por brazo:",
+    paste0(names(preds), "=", sapply(preds, function(p) length(corridas_de(p))),
            collapse = "  "), "\n")
 
 # Familia 1 ---------------------------------------------------------------
 
-tb_semillas <- rbindlist(lapply(names(preds), function(w) {
+tb_corridas <- rbindlist(lapply(names(preds), function(w) {
   p <- preds[[w]]
-  rbindlist(lapply(semillas_de(p), function(s) {
+  rbindlist(lapply(corridas_de(p), function(s) {
     g <- ganancia_maxima(p[[s]], p$clase_ternaria)
     corte <- p$clase_ternaria[order(-p[[s]])][seq_len(g$envios)]
-    data.table(peso = as.numeric(w), semilla = s,
+    data.table(peso = as.numeric(w), corrida = s,
                ganancia = g$ganancia, envios = g$envios,
                baja1_en_corte = sum(corte == "BAJA+1"),
                baja2_en_corte = sum(corte == "BAJA+2"))
   }))
 }))
 
-# Wilcoxon pareado por semilla, unilateral: a gana a ref
+# Wilcoxon pareado por corrida (semilla primigenia), unilateral: a gana a ref
 comparar <- function(a, ref) {
-  x <- merge(a[, list(semilla, g = ganancia)], ref[, list(semilla, g0 = ganancia)],
-             by = "semilla")
+  x <- merge(a[, list(corrida, g = ganancia)], ref[, list(corrida, g0 = ganancia)],
+             by = "corrida")
   if (nrow(x) < 2) return(data.table(pares = nrow(x), dif_media = NA_real_,
                                      p_valor = NA_real_))
   data.table(
@@ -147,9 +145,9 @@ comparar <- function(a, ref) {
   )
 }
 
-base <- tb_semillas[peso == 1]
+base <- tb_corridas[peso == 1]
 
-resumen_f1 <- tb_semillas[, list(semillas = .N,
+resumen_f1 <- tb_corridas[, list(corridas = .N,
                                  ganancia_media = mean(ganancia),
                                  desvio = sd(ganancia),
                                  envios_medio = mean(envios),
@@ -159,7 +157,7 @@ resumen_f1 <- tb_semillas[, list(semillas = .N,
 setorder(resumen_f1, -ganancia_media)
 
 test_f1 <- rbindlist(lapply(intersect(PESOS, as.numeric(names(preds))), function(w) {
-  cbind(peso = w, comparar(tb_semillas[peso == w], base))
+  cbind(peso = w, comparar(tb_corridas[peso == w], base))
 }))
 if (nrow(test_f1)) {
   test_f1[, p_holm := p.adjust(p_valor, method = "holm")]
@@ -171,7 +169,7 @@ cat("\n==== Familia 1: ganancia media por peso (w = 1 es ", EXP_BASE, ") ====\n"
 print(resumen_f1)
 cat("\n==== Familia 1: Wilcoxon pareado contra ", EXP_BASE, " ====\n", sep = "")
 print(test_f1)
-cat("Con 10 pares el p minimo de Wilcoxon es 1/1024; Holm sobre", nrow(test_f1),
+cat("Con 10 corridas pareadas el p minimo de Wilcoxon es 1/1024; Holm sobre", nrow(test_f1),
     "pesos exige p sin corregir <=", signif(NIVEL / max(1, nrow(test_f1)), 2),
     "para el mejor.\n")
 cat(if (nrow(test_f1) && any(test_f1$acepta_H1)) "H1 se ACEPTA" else
@@ -188,7 +186,7 @@ if (nrow(test_f1) && any(test_f1$acepta_H1)) {
 w_f2 <- intersect(PESOS_FASE2, as.numeric(names(preds)))
 if (length(w_f2)) {
   test_fase2 <- rbindlist(lapply(w_f2, function(w) {
-    cbind(peso = w, comparar(tb_semillas[peso == w], base))
+    cbind(peso = w, comparar(tb_corridas[peso == w], base))
   }))
   test_fase2[, p_holm := p.adjust(p_valor, method = "holm")]
   test_fase2[, gana := !is.na(p_holm) & p_holm < NIVEL]
@@ -204,12 +202,12 @@ ensamblar <- function(w) {
   pw <- preds[[w]]
   x <- merge(p0, pw[, -"clase_ternaria"], by = "numero_de_cliente",
              suffixes = c(".b", ".w"))
-  rbindlist(lapply(intersect(semillas_de(p0), semillas_de(pw)), function(s) {
+  rbindlist(lapply(intersect(corridas_de(p0), corridas_de(pw)), function(s) {
     r_b <- frank(x[[paste0(s, ".b")]], ties.method = "average")
     r_w <- frank(x[[paste0(s, ".w")]], ties.method = "average")
     rbindlist(lapply(ALFAS, function(a) {
       g <- ganancia_maxima(a * r_b + (1 - a) * r_w, x$clase_ternaria)
-      data.table(peso = as.numeric(w), alfa = a, semilla = s,
+      data.table(peso = as.numeric(w), alfa = a, corrida = s,
                  ganancia = g$ganancia, envios = g$envios)
     }))
   }))
@@ -222,7 +220,7 @@ if (nrow(tb_ensamble)) {
   test_f2 <- tb_ensamble[, {
     w_ <- .BY$peso
     cb <- comparar(.SD, base)
-    cw <- comparar(.SD, tb_semillas[peso == w_])
+    cw <- comparar(.SD, tb_corridas[peso == w_])
     list(pares = cb$pares, ganancia_media = mean(ganancia),
          envios_medio = mean(envios),
          dif_vs_base = cb$dif_media, p_vs_base = cb$p_valor,
@@ -257,27 +255,31 @@ if (nrow(tb_ensamble)) {
 
   fwrite(test_f2, file.path(PATH_SALIDA, "f2_wilcoxon.txt"), sep = "\t")
   fwrite(resumen_f2, file.path(PATH_SALIDA, "f2_resumen.txt"), sep = "\t")
-  fwrite(tb_ensamble, file.path(PATH_SALIDA, "f2_ensamble_semillas.txt"), sep = "\t")
+  fwrite(tb_ensamble, file.path(PATH_SALIDA, "f2_ensamble_corridas.txt"), sep = "\t")
 }
 
 # Bordes ------------------------------------------------------------------
 
-# hiperparametros optimos de cada brazo: los guarda cada archivo de semilla
-tb_bordes <- rbindlist(lapply(c(1, PESOS_TODOS), function(w) {
-  archs <- Sys.glob(file.path(PATH_EXP, nombre_exp(w), "semillas", "pred_*.txt"))
-  if (!length(archs)) return(NULL)
-  a <- archs[which.max(file.mtime(archs))]
-  h <- fread(a, select = HIPER, nrows = 1)
-  rbindlist(lapply(HIPER, function(v) {
-    b <- BORDES[[v]]
-    x <- h[[v]]
-    if (v == "min_sum_hessian_in_leaf") { b <- log(b); x <- log(x) }
-    pos <- (x - b[1]) / (b[2] - b[1])
-    data.table(peso = w, hiperparametro = v, valor = h[[v]],
-               posicion_en_rango = round(pos, 3),
-               en_borde = pos < TOL_BORDE | pos > 1 - TOL_BORDE)
+# hiperparametros optimos de cada corrida de cada brazo (su PARAM.yml)
+tb_bordes_corridas <- rbindlist(lapply(c(1, PESOS_TODOS), function(w) {
+  rbindlist(lapply(corridas_terminadas(nombre_exp(w)), function(d) {
+    h <- yaml::read_yaml(file.path(d, "PARAM.yml"))$out$bo$mejores_hiperparametros
+    rbindlist(lapply(HIPER, function(v) {
+      b <- BORDES[[v]]
+      pos <- (h[[v]] - b[1]) / (b[2] - b[1])
+      data.table(peso = w, corrida = basename(d), hiperparametro = v, valor = h[[v]],
+                 posicion_en_rango = round(pos, 3),
+                 en_borde = pos < TOL_BORDE | pos > 1 - TOL_BORDE)
+    }))
   }))
 }))
+tb_bordes <- if (nrow(tb_bordes_corridas)) {
+  tb_bordes_corridas[, list(corridas = .N, mediana = median(valor),
+                            posicion_mediana = median(posicion_en_rango),
+                            corridas_en_borde = sum(en_borde),
+                            en_borde = sum(en_borde) > 0),
+                     list(peso, hiperparametro)]
+} else data.table()
 
 if (nrow(tb_bordes)) {
   cat("\n==== Bordes: hiperparametros optimos (posicion 0 = minimo, 1 = maximo) ====\n")
@@ -286,9 +288,10 @@ if (nrow(tb_bordes)) {
     cat("ATENCION: hay hiperparametros contra el borde del rango\n")
   }
   fwrite(tb_bordes, file.path(PATH_SALIDA, "bordes.txt"), sep = "\t")
+  fwrite(tb_bordes_corridas, file.path(PATH_SALIDA, "bordes_corridas.txt"), sep = "\t")
 }
 
-fwrite(tb_semillas, file.path(PATH_SALIDA, "f1_semillas.txt"), sep = "\t")
+fwrite(tb_corridas, file.path(PATH_SALIDA, "f1_corridas.txt"), sep = "\t")
 fwrite(resumen_f1, file.path(PATH_SALIDA, "f1_resumen.txt"), sep = "\t")
 fwrite(test_f1, file.path(PATH_SALIDA, "f1_wilcoxon.txt"), sep = "\t")
 cat("\nResultados en", PATH_SALIDA, "\n")

@@ -93,19 +93,46 @@ ramas = [("0.75", ""), ("0.50", ""), ("0.25", ""), ("0.00", ", solo BAJA+2"),
 
 s = []
 s += [P("Target Engineering: correr y comparar las ramas", titulo),
-      P("Una rama por VM, con 8 hilos, repartidas entre el grupo", subt)]
+      P("Versión 2 (baseline de BASELINE_FINAL.ipynb, max_bin 31). Una rama por VM, con 8 hilos", subt)]
 s += [P("Son 5 ramas: el mismo modelo que Exp_0, con los BAJA+1 entrenando con otro peso. Cada rama "
-        "tarda unas <b>27 horas</b> y usa <b>8 hilos</b>, igual que Exp_0. Cada VM corre <b>una rama "
+        "tarda lo mismo que Exp_0 y usa <b>8 hilos</b>, igual que Exp_0. Cada VM corre <b>una rama "
         "por vez</b>; para correr varias en paralelo se usan varias VMs. Las ramas se reparten entre el "
         "grupo y al final se juntan en una sola VM para comparar con Wilcoxon.")]
 s += aviso("Siempre sin sudo, y <b>nunca dos ramas a la vez en la misma VM</b>. Toda rama se lanza con "
            "<b>OMP_NUM_THREADS=8</b> adelante, aunque la VM tenga 12 CPUs: si falta, LightGBM usa todas "
            "las CPUs, los árboles cambian y la rama ya no es comparable con Exp_0.")
 
+s += [KeepTogether([P("Qué cambió en la versión 2: hay que empezar de nuevo", h2),
+      P(f"{C('lightgbm_bo.R')} (Exp_0) y {C('te_nucleo.R')} (las ramas) ahora siguen "
+        f"{C('BASELINE_FINAL.ipynb')} del repo colaborativo {C('germandasr/DMEyF_Exp_Colaborativos')}, "
+        "con nuestra semilla primigenia <b>170383</b>:")] +
+      B([f"Parámetros fijos del {C('config.yaml')} del notebook: <b>max_bin = 31</b> (antes 255, el "
+         f"valor por defecto) y {C('deterministic = TRUE')}. El resto ya eran los valores por defecto.",
+         "BO: primero el 70/30 sobre todo el train y el undersampling 0.1 solo en el 70%. Se valida "
+         "en el 30% completo y la AUC es la máxima entre las iteraciones (best_score), como en el "
+         f"notebook. {C('min_sum_hessian_in_leaf')} se busca en escala lineal.",
+         "Producción: con <b>cada semilla</b> se vuelve a sortear el undersampling 0.1. Las 10 "
+         "semillas se sortean igual que en el notebook.",
+         "<b>10 corridas</b> por rama (y por Exp_0): todo el pipeline (BO + producción de 10 "
+         "semillas) se repite con 10 semillas primigenias, 170383 y 9 primos sorteados a partir de "
+         f"ella, las mismas en todas las ramas. Cada corrida queda en {C('sp_&lt;semilla&gt;/')} y "
+         "es una observación para Wilcoxon. Cuesta ~10 veces una corrida de la versión anterior.",
+         f"Exp_0 también se respalda en el bucket, igual que las ramas, en {C('gs://BUCKET/exp/Exp_0')}."]))]
+s += [P("Todo lo corrido con la versión anterior (Exp_0 y las ramas) ya no es comparable: <b>se "
+        "vuelve a correr todo, empezando por Exp_0</b>. En cada VM o compu que tenga corridas "
+        "viejas, y en tu bucket si las respaldaste ahí, movelas a un costado (no se borra nada):")]
+s += cod("mkdir -p ~/dmeyf/exp_v1\n"
+         "mv ~/dmeyf/exp/Exp_0* ~/dmeyf/exp/TE_w* ~/dmeyf/exp_v1/ 2>/dev/null\n"
+         "gcloud storage mv gs://BUCKET/exp gs://BUCKET/exp_v1   # solo si tenias algo en el bucket")
+s += [P(f"Si te olvidás, el script frena solo: cada carpeta guarda su {C('configuracion.yml')} y, si "
+        "encuentra checkpoints de otra versión (en la carpeta o en el bucket), termina con un "
+        "<b>Error</b> que dice qué carpeta mover. Mové esa carpeta y volvé a lanzar.")]
+
 s += [P("0. Repartir las ramas", h2),
-      P("Anoten en la planilla quién corre cada rama, para que ninguna se corra dos veces ni quede "
-        "sin correr. La que termine todo junta los resultados (paso 6) y corre el análisis: "
-        "conviene que sea quien tiene Exp_0.")]
+      P("Anoten en la planilla quién corre <b>Exp_0</b> y quién cada rama, para que ninguna se corra "
+        "dos veces ni quede sin correr. Exp_0 es una corrida más (una VM): puede ir en paralelo con "
+        "las ramas. La que termine todo junta los resultados (paso 6) y corre el análisis: conviene "
+        "que sea quien tiene Exp_0.")]
 
 s += [P("1. Preparar la VM (una sola vez)", h2),
       P("Usá el template de la cátedra de <b>8 o 12 vCPUs</b>. Cualquiera de los dos corre una rama; "
@@ -135,19 +162,22 @@ s += [P("Los paquetes de R se instalan solos en tu home la primera vez que lanz�
 
 s += [P("2. Antes de cada rama", h2),
       P("Que no haya otra corrida y que nada ocupe la CPU:")]
-s += cod("ps aux | grep [t]e_nucleo      # no tiene que aparecer nada\n"
+s += cod("ps aux | grep -E '[t]e_nucleo|[l]ightgbm_bo'   # no tiene que aparecer nada\n"
          "top -bn1 | head -15            # nada cerca de 100 en %CPU\n"
          "cd ~/dmeyf2026 && git pull")
 
-s += [KeepTogether([P("3. Lanzar la rama", h2),
-                    P("Copiá y pegá el bloque de la rama que te toca. Después podés cerrar la "
+s += [KeepTogether([P("3. Lanzar Exp_0 o la rama", h2),
+                    P("Copiá y pegá el bloque de la corrida que te toca. Después podés cerrar la "
                       "ventana de SSH: la corrida sigue.")])]
+s += [KeepTogether([P("Exp_0 (baseline, el control de todas las ramas)", h3)] +
+                   cod("cd ~/dmeyf2026\n"
+                       "OMP_NUM_THREADS=8 nohup Rscript lightgbm_bo.R > ~/dmeyf/exp/Exp_0.log 2>&1 &"))]
 for w, extra in ramas:
     s += [KeepTogether([P(f"Rama peso {w}{extra}", h3)] +
                        cod(f"cd ~/dmeyf2026\n"
                            f"OMP_NUM_THREADS=8 nohup Rscript target_engineering/TE_w{w}.R > /dev/null 2>&1 &"))]
-s += [KeepTogether([P("A los 20-30 minutos, chequeá que arrancó y la versión de LightGBM (cambiá 0.75 por tu rama):")] +
-      cod("ps aux | grep [t]e_nucleo                  # tiene que aparecer\n"
+s += [KeepTogether([P("A los 20-30 minutos, chequeá que arrancó y la versión de LightGBM (cambiá TE_w0.75 por tu rama, o por Exp_0):")] +
+      cod("ps aux | grep -E '[t]e_nucleo|[l]ightgbm_bo'  # tiene que aparecer\n"
           "tail -5 ~/dmeyf/exp/TE_w0.75.log           # sin 'Error' ni 'Execution halted'\n"
           "grep -m2 Respaldo ~/dmeyf/exp/TE_w0.75.log # tiene que decir 'Respaldo: OK'\n"
           "Rscript -e 'packageVersion(\"lightgbm\")'    # la misma que en la VM de Exp_0") +
@@ -160,12 +190,17 @@ s += [KeepTogether([P("A los 20-30 minutos, chequeá que arrancó y la versión 
 
 s += [P("4. Saber si terminó", h2),
       P("Reemplazá 0.75 por la rama que está corriendo:")]
-s += cod("ls ~/dmeyf/exp/TE_w0.75/semillas | wc -l     # 10 = terminó\n"
-         "ls ~/dmeyf/exp/TE_w0.75/PARAM.yml            # se escribe al final de todo\n"
-         "tail -5 ~/dmeyf/exp/TE_w0.75.log             # al final: ==== TE_w0.75 ====")
-s += B(["Primero la BO: 12 evaluaciones, unas 8 h.",
-        "Después las semillas: 10, una cada ~100 min.",
-        f"Con {C('PARAM.yml')} y 10 semillas, la rama terminó. Si te toca otra, volvé al paso 2."])
+s += cod("grep '########' ~/dmeyf/exp/TE_w0.75.log | tail -1   # en que corrida va (k/10)\n"
+         "ls ~/dmeyf/exp/TE_w0.75/sp_*/PARAM.yml | wc -l      # corridas terminadas: 10 = terminó\n"
+         "ls ~/dmeyf/exp/TE_w0.75/resumen_corridas.txt        # se escribe al final de todo")
+s += B([f"Cada corrida tiene su carpeta {C('sp_&lt;semilla&gt;/')}. Primero hace la BO: 12 evaluaciones, "
+        f"cada una es una línea de {C('bo_evaluaciones.txt')} (la columna {C('minutos')} dice cuánto tardó). "
+        "Después hace las 10 semillas, cada una es un archivo en semillas/. Al final escribe su "
+        f"{C('PARAM.yml')} y pasa a la corrida siguiente.",
+        "Los tiempos de la versión anterior ya no sirven de referencia: anoten en la planilla los de "
+        "la primera corrida de Exp_0 nuevo (por 10 da el total).",
+        f"Con 10 {C('PARAM.yml')} y {C('resumen_corridas.txt')}, terminó. Para Exp_0, lo mismo en "
+        f"{C('~/dmeyf/exp/Exp_0/')}. Si te toca otra rama, volvé al paso 2."])
 
 s += [P("5. Si se corta o se traba", h2),
       P("Si la VM se reinició o R murió, volvé a lanzar el mismo bloque del paso 3 (con "
@@ -174,23 +209,26 @@ s += [P("Si la VM <b>desapareció</b> de la lista (las VMs Spot se pueden interr
         f"cualquier momento; en <i>Logs Explorer</i> aparece {C('compute.instances.preempted')}): creá "
         f"otra con el template, hacé el paso 1 con el <b>mismo bucket</b> (incluido {C('bucket.txt')}) y "
         "volvé a lanzar el mismo bloque del paso 3. Baja sola del bucket lo que ya estaba hecho y sigue "
-        "desde ahí: se pierde solo la evaluación o la semilla que estaba a medias.")]
+        "desde ahí: se pierde solo la evaluación o la semilla que estaba a medias. Las corridas "
+        "terminadas no se rehacen.")]
 s += [KeepTogether([P("Si pasan más de 3 h sin semilla nueva aunque R use mucha CPU, buscá con "
         f"{C('top')} otro proceso que ocupe CPU y frenalo. Si no se recupera:")] +
-      cod("pkill -f TE_w; pkill -f te_nucleo.R\n"
-          "ps aux | grep [t]e_nucleo     # no tiene que aparecer nada") +
+      cod("pkill -f TE_w; pkill -f te_nucleo.R; pkill -f lightgbm_bo.R\n"
+          "ps aux | grep -E '[t]e_nucleo|[l]ightgbm_bo'   # no tiene que aparecer nada") +
       [P("y volvé a lanzar el mismo bloque.")])]
-s += aviso("<b>No borres</b> las carpetas ~/dmeyf/exp/TE_w...: ahí está lo que ya se calculó.")
+s += aviso("<b>No borres</b> las carpetas ~/dmeyf/exp/Exp_0 ni ~/dmeyf/exp/TE_w... de la versión 2: "
+           "ahí está lo que ya se calculó.")
 
 s += [KeepTogether([P("Alternativa: correr una rama en tu compu", h2),
       P("Si tenés una compu con <b>Linux</b>, o con <b>Windows</b> usando WSL2 (más abajo), una rama "
-        "también se puede correr ahí en vez de en una VM. No se interrumpe como una VM Spot, pero tiene que quedar prendida las ~27 horas. "
+        "también se puede correr ahí en vez de en una VM. No se interrumpe como una VM Spot, pero tiene que quedar prendida todo lo que dure la rama. "
         "Anotala en la planilla igual que cualquier rama.")] +
       tabla([["Requisito", "Por qué"],
              ["8 núcleos o más (mejor 12 o más)", "La rama usa 8 hilos; si son justo 8, la compu queda "
               "muy lenta mientras corre."],
-             ["64 GB de RAM", "En la VM, solo R llegó a usar ~25 GB, más lo que ocupa LightGBM. Mientras "
-              "corre, no abras nada pesado."],
+             ["64 GB de RAM", "Con la versión anterior, R llegó a usar ~25 GB en la VM, más lo que ocupa "
+              "LightGBM. La versión 2 guarda el train completo para volver a sortear el undersampling "
+              "con cada semilla: puede usar algo más. Mientras corre, no abras nada pesado."],
              ["La <b>misma versión de LightGBM</b> que en la VM de Exp_0",
               "Con otra versión cambian los árboles y la rama ya no es comparable."],
              ["R, y para compilar los paquetes: gcc, g++ y make",
@@ -253,7 +291,7 @@ s += B(["<b>No cierres la ventana de Ubuntu</b> mientras corre: Windows puede ap
         f"{C('cp ~/dmeyf/exp/ramas_*.tar.gz /mnt/c/Users/TU_USUARIO/Downloads/')} y se pasa por Drive o mail."])
 
 s += [KeepTogether([P("6. Juntar todo en una VM", h2),
-      P("El análisis necesita <b>Exp_0 y las 5 ramas</b> (10 semillas cada una) en la misma VM. "
+      P("El análisis necesita <b>Exp_0 y las 5 ramas</b> (10 corridas cada una) en la misma VM. "
         "Cada uno, cuando terminaron sus ramas, las empaqueta y las sube a su bucket:")] +
       cod("cd ~/dmeyf/exp && tar czf ramas_$(whoami).tar.gz TE_w*/\n"
           "gcloud storage cp ramas_$(whoami).tar.gz gs://BUCKET/"))]
@@ -263,24 +301,28 @@ s += [P("Después lo baja desde la consola (<i>Cloud Storage</i> → su bucket �
         "consola, y en su VM:")]
 s += cod("gcloud storage cp 'gs://BUCKET/*.tar.gz' ~/\n"
          "cd ~/dmeyf/exp && for f in ~/ramas_*.tar.gz ~/Exp_0.tar.gz; do tar xzf $f; done\n"
-         "for d in ~/dmeyf/exp/Exp_0 ~/dmeyf/exp/TE_w*; do echo \"$d $(ls $d/semillas | wc -l)\"; done\n"
+         "for d in ~/dmeyf/exp/Exp_0 ~/dmeyf/exp/TE_w*; do echo \"$d $(ls $d/sp_*/PARAM.yml | wc -l)\"; done\n"
          "                                    # todas tienen que dar 10")
 s += [P(f"Si Exp_0 corrió en esa misma VM, ya está en {C('~/dmeyf/exp/Exp_0')}: no hace falta subirlo. "
-        f"Si no, quien lo corrió lo empaqueta con {C('tar czf Exp_0.tar.gz Exp_0/')} y lo pasa igual.")]
+        f"Si no, quien lo corrió lo empaqueta con {C('cd ~/dmeyf/exp && tar czf Exp_0.tar.gz Exp_0/')} "
+        "y lo pasa igual.")]
 
 s += [P("7. Comparar con Wilcoxon", h2)]
 s += cod("cd ~/dmeyf2026 && git pull\n"
          "Rscript target_engineering/te_analisis.R | tee ~/dmeyf/exp/TE_analisis.log")
 s += [P(f"No entrena nada: tarda unos minutos. Las tablas quedan en {C('~/dmeyf/exp/TE_analisis/')}. Qué mirar:")]
-s += B(["<b>Familia 1</b>: cada peso contra Exp_0, Wilcoxon pareado por semilla con corrección de "
-        "Holm sobre los 5 pesos. Al final dice <b>H1 se ACEPTA</b> o <b>H1 NO se acepta</b>. Con 10 "
-        "semillas, un peso tiene que ganarle a Exp_0 en unas 9 de 10 para ser significativo.",
+s += B(["<b>Familia 1</b>: la unidad es la <b>corrida</b>: su ganancia es la ganancia máxima del "
+        "ensamble de sus 10 semillas. Cada peso contra Exp_0, Wilcoxon pareado por semilla primigenia "
+        "(las 10 corridas de la rama contra las 10 de Exp_0), con corrección de Holm sobre los 5 pesos. "
+        "Al final dice <b>H1 se ACEPTA</b> o <b>H1 NO se acepta</b>. Con 10 corridas, un peso tiene que "
+        "ganarle a Exp_0 en unas 9 de 10 para ser significativo.",
         "<b>Ensambles (familia 2)</b>: no hay que correr nada más. Se arman con las predicciones "
-        "guardadas, para <b>cada peso</b> y cada α de 0.1 a 0.9: α·rank(Exp_0) + (1−α)·rank(w). Cada "
+        "guardadas, corrida por corrida, para <b>cada peso</b> y cada α de 0.1 a 0.9: α·rank(Exp_0) + (1−α)·rank(w). Cada "
         "ensamble se compara contra Exp_0 y contra el peso solo, con Holm sobre los 9 α. H2 se decide "
         "con el mejor peso y al final dice <b>H2 se ACEPTA</b> o <b>NO</b>. Ojo: el mejor peso se elige "
         "en el mismo mes que se evalúa, así que H2 está sesgada a favor.",
-        "<b>Bordes</b>: avisa si algún hiperparámetro óptimo quedó contra el borde del rango."])
+        "<b>Bordes</b>: para cada rama, en cuántas de sus 10 corridas el hiperparámetro óptimo quedó "
+        "contra el borde del rango."])
 
 s += [P("8. Fase 2 (solo si H1 se acepta)", h2),
       P("Si algún w &lt; 1 ganó, el análisis termina la familia 1 con una línea así:")]

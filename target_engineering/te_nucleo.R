@@ -318,11 +318,18 @@ config_actual <- as.yaml(list(
   undersampling = PARAM$trainingstrategy$undersampling,
   hyperparametertuning = PARAM$hyperparametertuning,
   semillas = PARAM$produccion$semillas,
-  param_fijos = PARAM$lgbm$param_fijos
+  # sin num_threads: la cantidad de hilos no invalida lo ya corrido (las
+  # corridas hechas con 12 hilos se retoman y se usan tal cual con 2)
+  param_fijos = PARAM$lgbm$param_fijos[setdiff(names(PARAM$lgbm$param_fijos), "num_threads")]
 ))
+config_guardada <- function() {
+  cfg <- read_yaml(ARCH_CONFIG)
+  cfg$param_fijos$num_threads <- NULL
+  cfg
+}
 
 config_distinta <- file.exists(ARCH_CONFIG) &&
-  !identical(read_yaml(ARCH_CONFIG), yaml.load(config_actual))
+  !identical(config_guardada(), yaml.load(config_actual))
 if (hay_checkpoints() || config_distinta) {
   if (!file.exists(ARCH_CONFIG) || config_distinta) {
     stop("La carpeta ", PATH_EXP, " tiene checkpoints de otra configuracion ",

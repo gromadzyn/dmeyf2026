@@ -116,9 +116,21 @@ s += [KeepTogether([P("Qué cambió en la versión 2.1: ramas en VMs de 2 vCPU",
          f"Cada VM respalda en el bucket solo sus corridas ({C('sp_&lt;semilla&gt;/')}), así que "
          "varias VMs pueden compartir la carpeta de una rama sin pisarse. El log lleva el rango: "
          f"{C('TE_w0.75_c1-5.log')}.",
-         "Una corrida tarda ~20 h en una VM de 2 vCPU (en la de 12 vCPU, 6,4 h). Las ramas que ya "
-         "estuvieran corriendo con 12 hilos hay que archivarlas como en la versión 2: el script frena "
-         "solo si encuentra checkpoints con otra cantidad de hilos."]))]
+         "Una corrida tarda ~20 h en una VM de 2 vCPU (en la de 12 vCPU, 6,4 h).",
+         "<b>Lo ya corrido con 12 hilos no se rehace</b>: corridas terminadas, evaluaciones de la BO y "
+         "semillas se retoman y se usan tal cual. La cantidad de hilos no cuenta como cambio de "
+         "configuración."]))]
+s += [KeepTogether([P("Si una rama ya estaba corriendo con 12 hilos", h3),
+      P("El proceso viejo hace sus 10 corridas una detrás de otra y no sabe de rangos: si sigue "
+        "corriendo mientras otras VMs hacen corridas de esa rama, las repite y pisa sus archivos en el "
+        "bucket. Por eso, antes de repartirla:")] +
+      cod("pkill -f TE_w; pkill -f te_nucleo.R      # en la VM vieja: frena la rama\n"
+          "ls ~/dmeyf/exp/TE_w0.75/sp_*/PARAM.yml   # corridas ya terminadas (k = 1, 2, ...)") +
+      B(["Las corridas terminadas quedan como están, en el bucket.",
+         "Las que faltan (incluida la que estaba a medias) se reparten en rangos en VMs de 2 vCPU con el "
+         "<b>mismo bucket</b>: cada VM baja del bucket lo que su rango ya tenía hecho y sigue desde ahí. "
+         "Por ejemplo, si terminaron la 1 y la 2: rangos 3-6 y 7-10.",
+         "Si la VM vieja no tenía bucket, empaquetá su carpeta y pasala igual que en el paso 6."]))]
 
 s += [KeepTogether([P("Qué cambió en la versión 2: hay que empezar de nuevo", h2),
       P(f"{C('lightgbm_bo.R')} (Exp_0) y {C('te_nucleo.R')} (las ramas) ahora siguen "

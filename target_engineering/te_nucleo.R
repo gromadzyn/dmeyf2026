@@ -13,9 +13,9 @@
 # El resultado queda en exp/TE_w<peso>/. El analisis (Wilcoxon, ensamble
 # por rankings, mecanismo) lo hace te_analisis.R.
 #
-# Hilos: las ramas usan num_threads = 2 (VMs de 2 vCPU: LightGBM escala mal
-# con muchos hilos, 6 VMs de 2 vCPU rinden ~2 veces una de 12). Exp_0 quedo
-# con 12 hilos; la cantidad de hilos solo cambia redondeos, sin sesgo.
+# Hilos: num_threads = 2 (VMs de 2 vCPU: LightGBM escala mal con muchos
+# hilos, 6 VMs de 2 vCPU rinden ~2 veces una de 12). Lo ya corrido con 12
+# hilos se retoma tal cual: la cantidad de hilos solo cambia redondeos.
 #
 # 10 corridas: todo el pipeline (BO + produccion de 10 semillas) se repite
 # con 10 semillas primigenias: 170383 y 9 primos sorteados a partir de ella
@@ -175,7 +175,7 @@ PARAM$lgbm$param_fijos <- list(
   boost_from_average = TRUE,
   force_row_wise = TRUE,
   deterministic = TRUE,
-  num_threads = 2L, # ramas en VMs de 2 vCPU (Exp_0 quedo con 12)
+  num_threads = 2L, # VMs de 2 vCPU (lo corrido con 12 hilos se retoma igual)
   verbosity = -100,
   max_depth = -1L,
   min_gain_to_split = 0,

@@ -5,10 +5,17 @@
 # CONTINUA tienen peso 1. El target binario sigue siendo BAJA+1 U BAJA+2.
 # Con w = 1 es exactamente Exp_0, por eso Exp_0 es el brazo de control.
 #
-# No se corre directo: cada peso tiene su script TE_w<peso>.R, que hace
-#   Rscript te_nucleo.R <peso>
+# Uso:  Rscript te_nucleo.R <peso> [corridas]
+#   corridas: cuales de las 10 corre este proceso, ej. 1-5, 6-10, 3 o 1,4,7
+#   (por defecto las 10). Asi una rama se reparte entre varias VMs chicas:
+#   cada una corre su rango y todas respaldan en la misma carpeta del bucket.
+#   Con corridas el log va a exp/TE_w<peso>_c<corridas>.log.
 # El resultado queda en exp/TE_w<peso>/. El analisis (Wilcoxon, ensamble
 # por rankings, mecanismo) lo hace te_analisis.R.
+#
+# Hilos: las ramas usan num_threads = 2 (VMs de 2 vCPU: LightGBM escala mal
+# con muchos hilos, 6 VMs de 2 vCPU rinden ~2 veces una de 12). Exp_0 quedo
+# con 12 hilos; la cantidad de hilos solo cambia redondeos, sin sesgo.
 #
 # 10 corridas: todo el pipeline (BO + produccion de 10 semillas) se repite
 # con 10 semillas primigenias: 170383 y 9 primos sorteados a partir de ella
@@ -75,7 +82,9 @@ instalar_y_cargar(c(
 # Parametros --------------------------------------------------------------
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 1) stop("Uso: Rscript te_nucleo.R <peso_baja1>   ej: 0.5")
+if (!length(args) %in% 1:2) {
+  stop("Uso: Rscript te_nucleo.R <peso_baja1> [corridas]   ej: 0.5 1-5")
+}
 
 PARAM <- list()
 PARAM$peso_baja1 <- as.numeric(args[1])
@@ -85,6 +94,21 @@ if (is.na(PARAM$peso_baja1) || PARAM$peso_baja1 < 0) {
 PARAM$experimento <- sprintf("TE_w%.2f", PARAM$peso_baja1)
 PARAM$semilla_primigenia_base <- 170383 # la misma de Exp_0: mismas semillas
 PARAM$corridas <- 10 # una por semilla primigenia
+
+# cuales corridas hace este proceso: "1-5", "6-10", "3", "1,4,7"
+ARG_CORRIDAS <- if (length(args) == 2) args[2] else ""
+if (!grepl("^[0-9,-]*$", ARG_CORRIDAS)) stop("corridas: algo como 1-5, 6-10 o 1,4,7")
+CORRIDAS_A_CORRER <- if (ARG_CORRIDAS == "") seq_len(PARAM$corridas) else {
+  sort(unique(unlist(lapply(strsplit(ARG_CORRIDAS, ",")[[1]], function(x) {
+    ab <- as.integer(strsplit(x, "-")[[1]])
+    if (length(ab) == 1) ab else seq(ab[1], ab[2])
+  }))))
+}
+if (anyNA(CORRIDAS_A_CORRER) || length(CORRIDAS_A_CORRER) == 0 ||
+    any(CORRIDAS_A_CORRER < 1 | CORRIDAS_A_CORRER > PARAM$corridas)) {
+  stop("corridas tiene que estar entre 1 y ", PARAM$corridas, ": ", ARG_CORRIDAS)
+}
+SUFIJO <- if (ARG_CORRIDAS == "") "" else paste0("_c", ARG_CORRIDAS)
 
 # primos de 6 cifras sorteados con una semilla, con el procedimiento de
 # BASELINE_FINAL.ipynb (se usa para las semillas primigenias y las de produccion)
@@ -151,7 +175,7 @@ PARAM$lgbm$param_fijos <- list(
   boost_from_average = TRUE,
   force_row_wise = TRUE,
   deterministic = TRUE,
-  num_threads = 12L, # siempre 12 hilos: Exp_0 y todas las ramas igual
+  num_threads = 2L, # ramas en VMs de 2 vCPU (Exp_0 quedo con 12)
   verbosity = -100,
   max_depth = -1L,
   min_gain_to_split = 0,
@@ -200,10 +224,12 @@ dir.create(PATH_EXP, showWarnings = FALSE, recursive = TRUE)
 
 # Respaldo en bucket ------------------------------------------------------
 
-# Si existe ~/dmeyf/bucket.txt con el nombre de un bucket, la carpeta del
-# experimento y su log se suben a gs://<bucket>/exp/ despues de cada
-# checkpoint. En una VM nueva (carpeta sin checkpoints) se bajan de ahi
-# antes de empezar, asi una VM Spot borrada no pierde lo ya calculado.
+# Si existe ~/dmeyf/bucket.txt con el nombre de un bucket, cada corrida
+# (sp_<semilla>/), configuracion.yml y el log se suben a gs://<bucket>/exp/
+# despues de cada checkpoint. Cada proceso sube y baja SOLO las corridas de
+# su rango, asi varias VMs pueden compartir la carpeta de una rama sin
+# pisarse. En una VM nueva se bajan antes de empezar las corridas de su rango
+# que no esten en el disco, asi una VM Spot borrada no pierde lo calculado.
 # Si la subida falla se avisa en el log y la corrida sigue igual.
 ARCH_BUCKET <- file.path(HOME_DMeyF, "bucket.txt")
 BUCKET <- if (file.exists(ARCH_BUCKET)) {
@@ -211,7 +237,9 @@ BUCKET <- if (file.exists(ARCH_BUCKET)) {
 } else ""
 if (length(BUCKET) == 0 || is.na(BUCKET)) BUCKET <- ""
 GS_EXP <- paste0("gs://", BUCKET, "/exp/", PARAM$experimento)
-ARCH_LOG <- file.path(HOME_DMeyF, "exp", paste0(PARAM$experimento, ".log"))
+ARCH_LOG <- file.path(HOME_DMeyF, "exp", paste0(PARAM$experimento, SUFIJO, ".log"))
+ARCH_CONFIG <- file.path(PATH_EXP, "configuracion.yml")
+ARCH_RESUMEN <- paste0("resumen_corridas", SUFIJO, ".txt")
 
 gcloud <- function(args) {
   salida <- tryCatch(
@@ -222,13 +250,23 @@ gcloud <- function(args) {
   list(ok = is.null(estado) || estado == 0L, salida = salida)
 }
 
-respaldar <- function() {
+# sube la corrida sp (si se da), configuracion.yml, el resumen y el log
+respaldar <- function(sp = NULL) {
   if (BUCKET == "") return(invisible(FALSE))
-  r <- gcloud(c("storage", "rsync", "--recursive",
-                shQuote("--exclude=.*\\.tmp$|^modelo_tmp\\.txt$"),
-                shQuote(PATH_EXP), GS_EXP))
+  r <- list(ok = TRUE)
+  if (!is.null(sp)) {
+    r <- gcloud(c("storage", "rsync", "--recursive",
+                  shQuote("--exclude=.*\\.tmp$|^modelo_tmp\\.txt$"),
+                  shQuote(file.path(PATH_EXP, paste0("sp_", sp))),
+                  paste0(GS_EXP, "/sp_", sp)))
+  }
+  sueltos <- c(ARCH_CONFIG, file.path(PATH_EXP, ARCH_RESUMEN))
+  for (f in sueltos[file.exists(sueltos)]) {
+    if (r$ok) r <- gcloud(c("storage", "cp", shQuote(f), paste0(GS_EXP, "/", basename(f))))
+  }
   if (r$ok && file.exists(ARCH_LOG)) {
-    r <- gcloud(c("storage", "cp", shQuote(ARCH_LOG), paste0(GS_EXP, ".log")))
+    r <- gcloud(c("storage", "cp", shQuote(ARCH_LOG),
+                  paste0(GS_EXP, SUFIJO, ".log")))
   }
   if (!r$ok) {
     cat("ATENCION: no se pudo respaldar en gs://", BUCKET, ": ",
@@ -238,19 +276,31 @@ respaldar <- function() {
 }
 
 # checkpoints de cualquier corrida (o de una version vieja, sin sp_*)
-hay_checkpoints <- function() {
-  length(list.files(PATH_EXP, recursive = TRUE,
+hay_checkpoints <- function(dir = PATH_EXP) {
+  length(list.files(dir, recursive = TRUE,
                     pattern = "^bo_evaluaciones\\.txt$|^pred_.*\\.txt$")) > 0
 }
 
 if (BUCKET == "") {
   cat("ATENCION: sin ", ARCH_BUCKET, ": no se respalda en ningun bucket\n", sep = "")
-} else if (!hay_checkpoints()) {
-  r <- gcloud(c("storage", "rsync", "--recursive", GS_EXP, shQuote(PATH_EXP)))
-  if (r$ok && hay_checkpoints()) {
-    cat("Respaldo: checkpoints bajados de ", GS_EXP, "\n", sep = "")
+} else {
+  # la configuracion del bucket (de esta u otra VM) se baja si no hay local,
+  # para que el chequeo de abajo frene si el bucket tiene otra version
+  if (!file.exists(ARCH_CONFIG)) {
+    gcloud(c("storage", "cp", paste0(GS_EXP, "/configuracion.yml"), shQuote(ARCH_CONFIG)))
+  }
+  bajadas <- 0L
+  for (sp in PARAM$semillas_primigenias[CORRIDAS_A_CORRER]) {
+    d <- file.path(PATH_EXP, paste0("sp_", sp))
+    if (hay_checkpoints(d)) next
+    dir.create(d, showWarnings = FALSE)
+    r <- gcloud(c("storage", "rsync", "--recursive", paste0(GS_EXP, "/sp_", sp), shQuote(d)))
+    if (r$ok && hay_checkpoints(d)) bajadas <- bajadas + 1L
+  }
+  if (bajadas > 0) {
+    cat("Respaldo: checkpoints de ", bajadas, " corrida(s) bajados de ", GS_EXP, "\n", sep = "")
   } else {
-    cat("Respaldo: no hay checkpoints en ", GS_EXP, ", se empieza de cero\n", sep = "")
+    cat("Respaldo: no hay checkpoints nuevos en ", GS_EXP, " para estas corridas\n", sep = "")
   }
 }
 
@@ -258,7 +308,6 @@ if (BUCKET == "") {
 # primera vez se escribe configuracion.yml y despues se compara. Una carpeta
 # con checkpoints de otra version del script (por ejemplo, de antes de
 # max_bin = 31) frena la corrida en vez de mezclarse con la nueva.
-ARCH_CONFIG <- file.path(PATH_EXP, "configuracion.yml")
 config_actual <- as.yaml(list(
   version = "baseline_final_ipynb",
   experimento = PARAM$experimento,
@@ -272,9 +321,10 @@ config_actual <- as.yaml(list(
   param_fijos = PARAM$lgbm$param_fijos
 ))
 
-if (hay_checkpoints()) {
-  if (!file.exists(ARCH_CONFIG) ||
-      !identical(read_yaml(ARCH_CONFIG), yaml.load(config_actual))) {
+config_distinta <- file.exists(ARCH_CONFIG) &&
+  !identical(read_yaml(ARCH_CONFIG), yaml.load(config_actual))
+if (hay_checkpoints() || config_distinta) {
+  if (!file.exists(ARCH_CONFIG) || config_distinta) {
     stop("La carpeta ", PATH_EXP, " tiene checkpoints de otra configuracion ",
          "(otra version del script). Movela a otro lado para empezar de cero:\n",
          "  mkdir -p ", file.path(HOME_DMeyF, "exp_viejo"), " && mv ", PATH_EXP, " ",
@@ -616,7 +666,7 @@ correr <- function(sp, k) {
            file = ARCH_BO_EVALS, sep = "\t",
            append = file.exists(ARCH_BO_EVALS))
 
-    respaldar()
+    respaldar(sp)
 
     message(format(Sys.time(), "%a %b %d %X %Y"),
             " AUC ", round(auc, 6), " (iter ", mejor_iter, ")",
@@ -825,7 +875,7 @@ correr <- function(sp, k) {
                                 min_sum_hessian_in_leaf =
                                   mejores$min_sum_hessian_in_leaf),
                      file = arch_semilla, sep = "\t")
-      respaldar()
+      respaldar(sp)
 
       # la importancia es informativa: si falla, se avisa y el semilleo sigue
       if (!file.exists("impo.txt") && !intento_importancia) {
@@ -900,7 +950,7 @@ correr <- function(sp, k) {
   )
 
   write_yaml(PARAM, file = "PARAM.yml")
-  respaldar()
+  respaldar(sp)
 
   cat("\n==== ", PARAM$experimento, " - semilla primigenia ", sp, " ====\n",
       "Peso BAJA+1: ", PARAM$peso_baja1, "\n",
@@ -922,11 +972,13 @@ correr <- function(sp, k) {
 
 }
 
-tb_corridas <- rbindlist(lapply(seq_along(PARAM$semillas_primigenias), function(k) {
+cat("Corridas de este proceso: ", paste(CORRIDAS_A_CORRER, collapse = ","),
+    " (de ", PARAM$corridas, ")\n", sep = "")
+tb_corridas <- rbindlist(lapply(CORRIDAS_A_CORRER, function(k) {
   correr(PARAM$semillas_primigenias[k], k)
 }))
 setwd(PATH_EXP)
-fwrite(tb_corridas, file = "resumen_corridas.txt", sep = "\t")
+fwrite(tb_corridas, file = ARCH_RESUMEN, sep = "\t")
 respaldar()
 
 cat("\n==== ", PARAM$experimento, ": ", nrow(tb_corridas), " corridas ====\n", sep = "")

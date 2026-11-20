@@ -203,24 +203,18 @@ s += [KeepTogether([P("3. Lanzar el rango", h2),
                     P("Copiá el bloque de tu rama y poné al final el rango que te tocó en la planilla "
                       f"(acá {C('1-5')}). Después podés cerrar la ventana de SSH: la corrida sigue.")])]
 s += [KeepTogether([P("Exp_0: las corridas que faltan", h3),
-      P("La corrida 1 de Exp_0 ya terminó con 12 hilos y la 2 está en marcha en la VM de 12 vCPUs. "
-        "Nada de eso se rehace. Dejá que la VM de 12 vCPUs termine la corrida 2 (con 12 hilos es "
-        "más rápida) y frenala apenas termine, antes de que empiece la 3. Lo hace solo este "
-        "vigilante, que se lanza <b>en la VM de Exp_0</b> (cambiá BUCKET):")] +
-      cod("nohup bash -c 'until [ $(gcloud storage ls \"gs://BUCKET/exp/Exp_0/sp_*/PARAM.yml\" 2>/dev/null | wc -l) -ge 2 ]; \\\n"
-          "  do sleep 60; done; pkill -f lightgbm_bo.R' > ~/vigilante.log 2>&1 &") +
-      [P("Espera a que el PARAM.yml de la corrida 2 esté en el bucket y recién ahí frena a R. Las "
-         "corridas 3 a 10 se lanzan ya mismo, en VMs de 2 vCPU con el <b>mismo bucket</b> que Exp_0, "
-         "un rango por VM. Por ejemplo, de a 2 corridas:")] +
+      P("La corrida 1 de Exp_0 terminó con 12 hilos y la 2 quedó a medias en el bucket (Google borró "
+        "la VM de 12 vCPUs). Nada de eso se rehace. Las corridas <b>2 a 10</b> se lanzan en VMs de "
+        "2 vCPU con el <b>mismo bucket</b> que Exp_0, un rango por VM. La VM que toma la 2 baja del "
+        "bucket lo que ya tenía y sigue desde ahí. Por ejemplo, de a 2 corridas:")] +
       cod("cd ~/dmeyf2026 && git pull\n"
-          "nohup Rscript lightgbm_bo.R 3-4 > ~/dmeyf/exp/Exp_0_c3-4.log 2>&1 &   # otra VM: 5-6, 7-8, 9-10") +
+          "nohup Rscript lightgbm_bo.R 2-3 > ~/dmeyf/exp/Exp_0_c2-3.log 2>&1 &   # otras VMs: 4-5, 6-7, 8-9, 10") +
+      [P("Antes de lanzar, chequeá que el bucket tenga lo de la VM borrada:")] +
+      cod("gcloud storage ls \"gs://BUCKET/exp/Exp_0/sp_*/PARAM.yml\"     # 1 archivo: la corrida 1\n"
+          "gcloud storage cat \"gs://BUCKET/exp/Exp_0/sp_*/bo_evaluaciones.txt\" | wc -l  # BO hechas (+ encabezados)") +
       B(["En el nombre del log va el mismo rango que en el comando.",
-         f"<b>No hagas {C('git pull')} en la VM de Exp_0 mientras corre</b>: R va leyendo el script "
-         "mientras avanza.",
-         f"Si preferís no esperar la corrida 2: frená Exp_0 ahora ({C('pkill -f lightgbm_bo.R')}) y "
-         "agregá la 2 a un rango (por ejemplo 2-4). La VM que la toma baja del bucket lo que ya tenía "
-         "y sigue desde ahí, con 2 hilos.",
-         "Cuando la VM de 12 vCPUs se frena, ya no hace falta: apagala."]))]
+         "En el log de la VM que toma la corrida 2 tiene que aparecer <b>Respaldo: checkpoints de 1 "
+         "corrida(s) bajados</b> y <b>BO: se retoman ... evaluaciones</b>."]))]
 for w, extra in ramas:
     s += [KeepTogether([P(f"Rama peso {w}{extra}", h3)] +
                        cod(f"cd ~/dmeyf2026\n"
@@ -353,8 +347,9 @@ s += cod("gcloud storage cp 'gs://BUCKET/*.tar.gz' ~/\n"
          "cd ~/dmeyf/exp && for f in ~/vm_*.tar.gz; do tar xzf $f; done  # se suman\n"
          "for d in ~/dmeyf/exp/Exp_0 ~/dmeyf/exp/TE_w*; do echo \"$d $(ls $d/sp_*/PARAM.yml | wc -l)\"; done\n"
          "                                    # todas tienen que dar 10")
-s += [P("Incluí también el tar de la VM de 12 vCPUs de Exp_0 (tiene las corridas 1 y 2). Si todas "
-        f"las VMs de Exp_0 usaron tu bucket, alcanza con {C('gcloud storage rsync --recursive gs://BUCKET/exp/Exp_0 ~/dmeyf/exp/Exp_0')}.")]
+s += [P("La corrida 1 de Exp_0 no está en ningún tar (su VM ya no existe): está en el bucket. Si "
+        "todas las VMs de Exp_0 usaron ese bucket, alcanza con "
+        f"{C('gcloud storage rsync --recursive gs://BUCKET/exp/Exp_0 ~/dmeyf/exp/Exp_0')}.")]
 
 s += [P("7. Comparar con Wilcoxon", h2)]
 s += cod("cd ~/dmeyf2026 && git pull\n"

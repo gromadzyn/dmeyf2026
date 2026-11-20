@@ -93,14 +93,15 @@ ramas = [("0.75", ""), ("0.50", ""), ("0.25", ""), ("0.00", ", solo BAJA+2"),
 
 s = []
 s += [P("Target Engineering: correr y comparar las ramas", titulo),
-      P("Versión 2 (baseline de BASELINE_FINAL.ipynb, max_bin 31). Una rama por VM, con 8 hilos", subt)]
+      P("Versión 2 (baseline de BASELINE_FINAL.ipynb, max_bin 31). Una rama por VM de 12 vCPUs, con 12 hilos", subt)]
 s += [P("Son 5 ramas: el mismo modelo que Exp_0, con los BAJA+1 entrenando con otro peso. Cada rama "
-        "tarda lo mismo que Exp_0 y usa <b>8 hilos</b>, igual que Exp_0. Cada VM corre <b>una rama "
+        "tarda lo mismo que Exp_0 y usa <b>12 hilos</b>, igual que Exp_0. Cada VM corre <b>una rama "
         "por vez</b>; para correr varias en paralelo se usan varias VMs. Las ramas se reparten entre el "
         "grupo y al final se juntan en una sola VM para comparar con Wilcoxon.")]
-s += aviso("Siempre sin sudo, y <b>nunca dos ramas a la vez en la misma VM</b>. Toda rama se lanza con "
-           "<b>OMP_NUM_THREADS=8</b> adelante, aunque la VM tenga 12 CPUs: si falta, LightGBM usa todas "
-           "las CPUs, los árboles cambian y la rama ya no es comparable con Exp_0.")
+s += aviso("Siempre sin sudo, y <b>nunca dos ramas a la vez en la misma VM</b>. Todo corre con "
+           "<b>12 hilos</b>: están fijos en el código (num_threads = 12), así que no hay que poner nada "
+           "en el comando. Por eso toda corrida va en una VM de <b>12 vCPUs</b>: con menos CPUs anda "
+           "mucho más lento.")
 
 s += [KeepTogether([P("Qué cambió en la versión 2: hay que empezar de nuevo", h2),
       P(f"{C('lightgbm_bo.R')} (Exp_0) y {C('te_nucleo.R')} (las ramas) ahora siguen "
@@ -135,8 +136,8 @@ s += [P("0. Repartir las ramas", h2),
         "que sea quien tiene Exp_0.")]
 
 s += [P("1. Preparar la VM (una sola vez)", h2),
-      P("Usá el template de la cátedra de <b>8 o 12 vCPUs</b>. Cualquiera de los dos corre una rama; "
-        "con 12 quedan 4 CPUs libres para el sistema. Si es la VM de Exp_0, esto ya está hecho: "
+      P("Usá el template de la cátedra de <b>12 vCPUs</b> (128 GB), el mismo para Exp_0 y todas las "
+        "ramas. Si es la VM de Exp_0, esto ya está hecho: "
         "saltá al paso 2.")]
 s += cod("git clone https://github.com/gromadzyn/dmeyf2026.git ~/dmeyf2026\n"
          "mkdir -p ~/dmeyf/datasets ~/dmeyf/exp")
@@ -171,11 +172,11 @@ s += [KeepTogether([P("3. Lanzar Exp_0 o la rama", h2),
                       "ventana de SSH: la corrida sigue.")])]
 s += [KeepTogether([P("Exp_0 (baseline, el control de todas las ramas)", h3)] +
                    cod("cd ~/dmeyf2026\n"
-                       "OMP_NUM_THREADS=8 nohup Rscript lightgbm_bo.R > ~/dmeyf/exp/Exp_0.log 2>&1 &"))]
+                       "nohup Rscript lightgbm_bo.R > ~/dmeyf/exp/Exp_0.log 2>&1 &"))]
 for w, extra in ramas:
     s += [KeepTogether([P(f"Rama peso {w}{extra}", h3)] +
                        cod(f"cd ~/dmeyf2026\n"
-                           f"OMP_NUM_THREADS=8 nohup Rscript target_engineering/TE_w{w}.R > /dev/null 2>&1 &"))]
+                           f"nohup Rscript target_engineering/TE_w{w}.R > /dev/null 2>&1 &"))]
 s += [KeepTogether([P("A los 20-30 minutos, chequeá que arrancó y la versión de LightGBM (cambiá TE_w0.75 por tu rama, o por Exp_0):")] +
       cod("ps aux | grep -E '[t]e_nucleo|[l]ightgbm_bo'  # tiene que aparecer\n"
           "tail -5 ~/dmeyf/exp/TE_w0.75.log           # sin 'Error' ni 'Execution halted'\n"
@@ -203,8 +204,8 @@ s += B([f"Cada corrida tiene su carpeta {C('sp_&lt;semilla&gt;/')}. Primero hace
         f"{C('~/dmeyf/exp/Exp_0/')}. Si te toca otra rama, volvé al paso 2."])
 
 s += [P("5. Si se corta o se traba", h2),
-      P("Si la VM se reinició o R murió, volvé a lanzar el mismo bloque del paso 3 (con "
-        f"{C('OMP_NUM_THREADS=8')}): retoma sola desde donde estaba.")]
+      P("Si la VM se reinició o R murió, volvé a lanzar el mismo bloque del paso 3: "
+        "retoma sola desde donde estaba.")]
 s += [P("Si la VM <b>desapareció</b> de la lista (las VMs Spot se pueden interrumpir y borrar en "
         f"cualquier momento; en <i>Logs Explorer</i> aparece {C('compute.instances.preempted')}): creá "
         f"otra con el template, hacé el paso 1 con el <b>mismo bucket</b> (incluido {C('bucket.txt')}) y "
@@ -224,7 +225,7 @@ s += [KeepTogether([P("Alternativa: correr una rama en tu compu", h2),
         "también se puede correr ahí en vez de en una VM. No se interrumpe como una VM Spot, pero tiene que quedar prendida todo lo que dure la rama. "
         "Anotala en la planilla igual que cualquier rama.")] +
       tabla([["Requisito", "Por qué"],
-             ["8 núcleos o más (mejor 12 o más)", "La rama usa 8 hilos; si son justo 8, la compu queda "
+             ["12 núcleos o más (mejor 16 o más)", "La rama usa 12 hilos; si son justo 12, la compu queda "
               "muy lenta mientras corre."],
              ["64 GB de RAM", "Con la versión anterior, R llegó a usar ~25 GB en la VM, más lo que ocupa "
               "LightGBM. La versión 2 guarda el train completo para volver a sortear el undersampling "
@@ -242,7 +243,7 @@ s += cod("git clone https://github.com/gromadzyn/dmeyf2026.git ~/dmeyf2026\n"
          "Rscript -e 'packageVersion(\"lightgbm\")'    # si ya está, la misma que en la VM de Exp_0")
 s += [KeepTogether([P("Antes de lanzar, hacé el paso 2. Después, el bloque de tu rama (cambiá 0.75):")] +
       cod("cd ~/dmeyf2026 && git pull\n"
-          "OMP_NUM_THREADS=8 nohup systemd-inhibit --what=sleep:idle --why=\"rama TE\" \\\n"
+          "nohup systemd-inhibit --what=sleep:idle --why=\"rama TE\" \\\n"
           "  Rscript target_engineering/TE_w0.75.R > /dev/null 2>&1 &"))]
 s += B([f"{C('systemd-inhibit')} evita que la compu se suspenda sola mientras corre la rama. No la "
         "suspendas ni la apagues a mano.",
@@ -281,7 +282,7 @@ s += [KeepTogether([P("4. Bajá el dataset de tu bucket con el navegador de Wind
 s += [KeepTogether([P("5. En Windows, <i>Configuración → Sistema → Energía</i>: suspender "
         "<b>Nunca</b> (enchufada) mientras corre. Hacé el paso 2 general (<i>Antes de cada rama</i>) y lanzá tu rama (cambiá 0.75):")] +
       cod("cd ~/dmeyf2026 && git pull\n"
-          "OMP_NUM_THREADS=8 nohup Rscript target_engineering/TE_w0.75.R > /dev/null 2>&1 &"))]
+          "nohup Rscript target_engineering/TE_w0.75.R > /dev/null 2>&1 &"))]
 s += B(["<b>No cierres la ventana de Ubuntu</b> mientras corre: Windows puede apagar WSL y frenar "
         "la rama. Si pasa, abrí Ubuntu y relanzá el mismo bloque: retoma.",
         "La primera vez los paquetes de R tardan más en instalarse que en la VM, porque se compilan. "
@@ -330,7 +331,7 @@ s += cod("Fase 2: w = 0.5 gana con p corregido < 0.05 -> correr TE_w0.40 y TE_w0
 s += [P("Esos dos pesos (el mejor ± 0.1) se corren como cualquier rama, con los pasos 2, 4 y 5: uno "
         "por VM (en dos VMs a la vez, o uno después del otro). Cambiá el peso por el que dijo el análisis:")]
 s += cod("cd ~/dmeyf2026/target_engineering\n"
-         "OMP_NUM_THREADS=8 nohup Rscript te_nucleo.R 0.40 > ~/dmeyf/exp/TE_w0.40.log 2>&1 &")
+         "nohup Rscript te_nucleo.R 0.40 > ~/dmeyf/exp/TE_w0.40.log 2>&1 &")
 s += [P(f"En el nombre del log usá el peso con dos decimales ({C('TE_w0.40.log')}), igual que la "
         f"carpeta que crea el script ({C('~/dmeyf/exp/TE_w0.40/')}). Si el mejor fue 0, la fase 2 es "
         "solo 0.10. Juntalas como en el paso 6.")]

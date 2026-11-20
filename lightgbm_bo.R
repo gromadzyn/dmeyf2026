@@ -10,7 +10,7 @@
 # exp/Exp_0/sp_<semilla>/ y es una observacion para Wilcoxon.
 # El preprocesamiento no depende de la semilla: se hace una sola vez.
 #
-# Uso:  OMP_NUM_THREADS=8 nohup Rscript lightgbm_bo.R > ~/dmeyf/exp/Exp_0.log 2>&1 &
+# Uso:  nohup Rscript lightgbm_bo.R > ~/dmeyf/exp/Exp_0.log 2>&1 &
 # Resultado en ~/dmeyf/exp/Exp_0/. Si se corta, volver a correr: retoma.
 #
 # 01 Preprocesamiento
@@ -141,6 +141,7 @@ PARAM$lgbm$param_fijos <- list(
   boost_from_average = TRUE,
   force_row_wise = TRUE,
   deterministic = TRUE,
+  num_threads = 12L, # siempre 12 hilos: Exp_0 y todas las ramas igual
   verbosity = -100,
   max_depth = -1L,
   min_gain_to_split = 0,
@@ -173,6 +174,11 @@ PARAM$hyperparametertuning$bordes <- list(
   num_leaves = c(16L, 2048L),
   min_sum_hessian_in_leaf = c(1e-06, 0.1)
 )
+
+if (parallel::detectCores() < PARAM$lgbm$param_fijos$num_threads) {
+  warning("Esta maquina tiene ", parallel::detectCores(), " CPUs y LightGBM usa ",
+          PARAM$lgbm$param_fijos$num_threads, " hilos: va a andar lento")
+}
 
 # Carpetas ----------------------------------------------------------------
 

@@ -98,7 +98,7 @@ s += [P("Son 5 ramas: el mismo modelo que Exp_0, con los BAJA+1 entrenando con o
         "son <b>10 corridas</b>, y las corridas de una rama se pueden <b>repartir entre varias VMs "
         "de 2 vCPU</b>: cada VM corre un rango (por ejemplo, las corridas 1-5 de la rama 0.75 en una "
         "VM y las 6-10 en otra). Al final todo se junta en una sola VM para comparar con Wilcoxon.")]
-s += aviso("Siempre sin sudo, y <b>un solo proceso por VM</b>. Las ramas usan <b>2 hilos</b>: están "
+s += aviso("Siempre sin sudo (salvo para apagar el escritorio remoto, paso 1), y <b>un solo proceso por VM</b>. Las ramas usan <b>2 hilos</b>: están "
            "fijos en el código (num_threads = 2), así que no hay que poner nada en el comando. <b>Lo ya "
            "corrido no se rehace</b>: la corrida de Exp_0 hecha con 12 hilos queda, y lo que le falta "
            "se reparte igual que las ramas (paso 3).")
@@ -192,11 +192,19 @@ s += [P(f"Si dice {C('AccessDeniedException')} o {C('insufficient scopes')}: det
         "(escritura sirve para el paso 6), guardá y volvé a iniciarla.")]
 s += [P("Los paquetes de R se instalan solos en tu home la primera vez que lanzás una rama: esa "
         "primera vez tarda unos 20 minutos más en arrancar.")]
+s += [KeepTogether([P("Apagar el escritorio remoto (en todas las VMs)", h3),
+      P(f"Los templates traen {C('gnome-remote-desktop')}, que a veces se queda ocupando un vCPU "
+        "entero. En una VM de 2 vCPU eso deja a R con uno solo, y LightGBM va <b>6 veces más lento</b> "
+        "porque sus 2 hilos se esperan entre sí (ya pasó: una evaluación de 33 min tardó 202). Apagalo "
+        "una vez por VM, aunque ahora no consuma nada; el disable hace que no vuelva al reiniciar:")] +
+      cod("sudo systemctl stop gnome-remote-desktop\n"
+          "sudo systemctl disable gnome-remote-desktop\n"
+          "top -bn1 | grep -E 'gnome-r|COMMAND'       # no tiene que aparecer gnome-r+"))]
 
 s += [P("2. Antes de cada rango", h2),
       P("Que no haya otra corrida y que nada ocupe la CPU:")]
 s += cod("ps aux | grep -E '[t]e_nucleo|[l]ightgbm_bo'   # no tiene que aparecer nada\n"
-         "top -bn1 | head -15            # nada cerca de 100 en %CPU\n"
+         "top -bn1 | head -15            # nada cerca de 100 en %CPU (ni gnome-r+)\n"
          "cd ~/dmeyf2026 && git pull")
 
 s += [KeepTogether([P("3. Lanzar el rango", h2),
@@ -255,8 +263,14 @@ s += [P("Si la VM <b>desapareció</b> de la lista (las VMs Spot se pueden interr
         "volvé a lanzar el mismo bloque del paso 3, con el mismo rango. Baja sola del bucket lo que ya estaba hecho y sigue "
         "desde ahí: se pierde solo la evaluación o la semilla que estaba a medias. Las corridas "
         "terminadas no se rehacen.")]
-s += [KeepTogether([P("Si pasan más de 6 h sin semilla nueva aunque R use mucha CPU, buscá con "
-        f"{C('top')} otro proceso que ocupe CPU y frenalo. Si no se recupera:")] +
+s += [KeepTogether([P("Si va mucho más lento de lo normal (una evaluación de la BO de más de 2 h, o "
+        "más de 3 h sin semilla nueva), mirá la CPU:")] +
+      cod("uptime              # load average: con R solo da ~2.0; ~3.0 = otro proceso le saca CPU\n"
+          "top -bn1 | head -12 # R tiene que estar cerca de 200 %CPU") +
+      [P(f"Si aparece {C('gnome-r+')} cerca de 100 %CPU, apagalo como en el paso 1 "
+         f"({C('sudo systemctl stop ...')} y {C('disable')}); si es otro proceso que no hace falta, "
+         f"{C('kill')} con su PID. No hace falta relanzar R: recupera la velocidad solo. Si R está "
+         "trabado igual:")] +
       cod("pkill -f TE_w; pkill -f te_nucleo.R; pkill -f lightgbm_bo.R\n"
           "ps aux | grep -E '[t]e_nucleo|[l]ightgbm_bo'   # no tiene que aparecer nada") +
       [P("y volvé a lanzar el mismo bloque.")])]
